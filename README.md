@@ -11,7 +11,7 @@ Contains the code for performing initdb, starting the server, and performing ben
 Contains configuration for PG
 
 - **wrapper.sh**: 
-The script sources pg.env file as well as <benchmark>.env file. In case of HammerDB, this transalates to hammerdb/hammerdb.env file. It has the ability to run multiple iterations of the benchmarks. See the envinronment file hammerdb/hammerdb.env and hammerdb/hammerdb.sh for benchmark specific variables.
+The script sources pg.env file as well as <benchmark>.env file. In case of HammerDB, this translates to hammerdb/hammerdb.env file. It has the ability to run multiple iterations of the benchmarks. See the environment file hammerdb/hammerdb.env and hammerdb/hammerdb.sh for benchmark specific variables.
 
 
 ### Running the Script

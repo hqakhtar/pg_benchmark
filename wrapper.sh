@@ -28,6 +28,7 @@ export BENCHMARK_SCRIPT="$BENCHMARK_TYPE/${BENCHMARK_SCRIPT:-$BENCHMARK_TYPE.sh}
 export PG_VERSION=""
 
 export PRELOAD_LIBRARY=""
+export PG_INIT_SQL=""
 
 
 ## USAGE
@@ -64,9 +65,10 @@ OPTIONS can be:
 
   -b  [BENCHMARK_Type]  Type of benchmark to run     [Default: $BENCHMARK_TYPE]
   -e  [PG_CONF_FILE]    PG configuration file.       [Default: $PG_CONF_FILE]
-  -i  [ITERATIONS]      Users for benchmarking       [Default: $ITERATIONS]
-  -l  [PRELOAD_LIBRARY] Users for benchmarking       [Default: $ITERATIONS]
-  -n  [BENCHMARK_NAME]  Users for schemabuild        [Default: $BENCHMARK_NAME]
+  -i  [ITERATIONS]      Number of iterations         [Default: $ITERATIONS]
+  -l  [PRELOAD_LIBRARY] Shared preload library       [Default: none]
+  -n  [BENCHMARK_NAME]  Benchmark name               [Default: $BENCHMARK_NAME]
+  -r  [PG_INIT_SQL]     SQL script to run after initdb [Default: none]
 
 EOF
 
@@ -140,7 +142,11 @@ run_loop()
 		script_logfile=$WORK_DIR/$BENCHMARK_NAME.$benchmark_type.$i.log
 
 		# Run benchmark with initdb, build schema, remove data directory options
-		$SCRIPT_DIR/$BENCHMARK_SCRIPT -i -S -z -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR 2>&1 | tee $script_logfile
+		if [[ ! -z "$PG_INIT_SQL" ]]; then
+			$SCRIPT_DIR/$BENCHMARK_SCRIPT -i -S -z -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR -r "$PG_INIT_SQL" 2>&1 | tee $script_logfile
+		else
+			$SCRIPT_DIR/$BENCHMARK_SCRIPT -i -S -z -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR 2>&1 | tee $script_logfile
+		fi
 		retval="$?"
 
 		if [[ $retval -ne 0 ]];
@@ -165,12 +171,12 @@ get_pg_version()
 # Run Benchmark
 run_benchmark()
 {
-	export PG_INITDB_OPTS="$PG_INITDB_OPTS_BASE"
+    export PG_INITDB_OPTS="$PG_INITDB_OPTS_BASE"
     benchmark_type="PG-$PG_VERSION"
 
 	if [[ ! -z "$PRELOAD_LIBRARY" ]];
 	then
-    	export PG_INITDB_OPTS="$PG_INITDB_OPTS -c shared_preload_libraries='"$PRELOAD_LIBRARY"'"
+        export PG_INITDB_OPTS="$PG_INITDB_OPTS -c shared_preload_libraries='"$PRELOAD_LIBRARY"'"
         benchmark_type="$benchmark_type-$PRELOAD_LIBRARY"
 	fi
 
@@ -178,7 +184,7 @@ run_benchmark()
 }
 
 # Check options passed in.
-while getopts "h C:e:H:i:l:n:t:" OPTION
+while getopts "h C:e:H:i:l:n:r:t:b:" OPTION
 do
     case $OPTION in
         h)
@@ -208,6 +214,10 @@ do
 
         n)
             BENCHMARK_NAME=$OPTARG
+            ;;
+
+        r)
+            PG_INIT_SQL=$OPTARG
             ;;
 
         t)

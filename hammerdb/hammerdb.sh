@@ -40,6 +40,9 @@ export PG_VU="${PG_VU:-20}"
 # Set a default data directory if we need to perform initdb
 export DATA_DIR_NAME="data.tpcc"
 
+# SQL script to run after initdb (optional)
+export PG_INIT_SQL=""
+
 
 ## USAGE
 usage()
@@ -56,7 +59,7 @@ This script can perform:
 - Generate build schema tcl script and build schema
 - Generate run tpcc benchmark script and run benchmark
 
-Some fo the options can also be set via environment variables. The relevant
+Some of the options can also be set via environment variables. The relevant
 variable is provided with each option. However, some arguments are mandatory
 to prevent any accidental environment/data corruption.
 
@@ -78,17 +81,19 @@ OPTIONS can be:
 
   -b  [PG_DBASE]          Benchmarking database     [Default: $PG_DBASE]
   -d  [PG_DEFAULTDBASE]   Default database          [Default: $PG_DEFAULTDBASE]
-  -D  [PG_DURATION]       Benchmark duration in min [Default: $PG_DEFAULTDBASE]
+  -D  [PG_DURATION]       Benchmark duration in min [Default: $PG_DURATION]
   -s  [PG_SUPERUSER]      Superuser                 [Default: $PG_SUPERUSER]
-  -v  [PG_USER]           Number of virtual users   [Default: $PG_NUM_VU]
+  -v  [PG_USER]           Benchmark user            [Default: $PG_USER]
   -w  [PG_COUNT_WARE]     Number of warehouses      [Default: $PG_COUNT_WARE]
-  -u  [PG_NUM_VU]         Users for schemabuild     [Default: $PG_USER]
+  -u  [PG_NUM_VU]         Users for schemabuild     [Default: $PG_NUM_VU]
   -U  [PG_VU]             Users for benchmarking    [Default: $PG_VU]
 
   -t                      Script working folder     [REQUIRED]
                           * a folder where data directory and relevant log
 						    files may be created
   -x                      HammerDB installation dir [REQUIRED]
+
+  -r  [PG_INIT_SQL]       SQL script to run after initdb [Default: none]
 
   -z                      Remove data directory on exit.
                           * this saves space and allows multiple iterations of
@@ -242,6 +247,33 @@ postgresql_start()
     fi
 }
 
+# Run SQL script after initdb if specified
+postgresql_run_init_sql()
+{
+    retval=0
+
+    if [[ ! -z "$PG_INIT_SQL" ]];
+    then
+        if [[ ! -f "$PG_INIT_SQL" ]];
+        then
+            echo "SQL script file does not exist: $PG_INIT_SQL" >&2
+            exit_script 1
+        fi
+
+        echo "Running SQL script: $PG_INIT_SQL"
+        psql -h $PGHOST -p $PGPORT -U $PG_SUPERUSER -d postgres -f "$PG_INIT_SQL" 2>&1 | tee $SCRIPT_WORKING_DIR/init_sql.log
+        retval=$?
+
+        if [[ $retval -ne 0 ]];
+        then
+            echo "SQL script execution failed. See log file [$SCRIPT_WORKING_DIR/init_sql.log] for details." >&2
+            exit_script 1
+        fi
+
+        echo "SQL script executed successfully."
+    fi
+}
+
 # Stop postgresql server
 postgresql_stop()
 {
@@ -306,14 +338,14 @@ EOF
 
 # Generate tcl file under $SCRIPT_WORKING_DIR for running the benchmark.
 #   - The script also has a timer so that we'd know when to stop the hammerdbcli.
-#     The timer is calclated based rampup time, benchmark duration and a 3 minute
-#     addtional buffer.
+#     The timer is calculated based rampup time, benchmark duration and a 3 minute
+#     additional buffer.
 tpcc_run_gen_script()
 {
     # add 3 minutes to the timer
     wait_timer=$(expr $PG_DURATION \* 60 + 180)
 
-    echo "Creating build schema script: $SCRIPT_WORKING_DIR/$SCRIPT_BULID_SCHEMA_TCL"
+    echo "Creating benchmark script: $SCRIPT_WORKING_DIR/$SCRIPT_BENCHMARK_TCL"
 
     cat << EOF >> $SCRIPT_WORKING_DIR/$SCRIPT_BENCHMARK_TCL
 #!/bin/tclsh
@@ -377,7 +409,7 @@ hammerdb_run_script()
 }
 
 # Check options passed in to the script.
-while getopts "h iSz C:H:p: b:d:s:v:w:u: t:x:" OPTION
+while getopts "h iSz C:H:p: b:d:D:s:v:w:u:U:r: t:x:" OPTION
 do
     case $OPTION in
         h)
@@ -411,17 +443,30 @@ do
         d)
             PG_DEFAULTDBASE=$OPTARG
             ;;
+        D)
+            PG_DURATION=$OPTARG
+            ;;
         s)
             PG_SUPERUSER=$OPTARG
             ;;
         v)
-            PG_NUM_VU=$OPTARG
+            PG_USER=$OPTARG
             ;;
         w)
             PG_COUNT_WARE=$OPTARG
             ;;
         u)
-            PG_USER=$OPTARG
+            PG_NUM_VU=$OPTARG
+            ;;
+        u)
+            PG_NUM_VU=$OPTARG
+            ;;
+        U)
+            PG_VU=$OPTARG
+            ;;
+
+        r)
+            PG_INIT_SQL=$OPTARG
             ;;
 
         t)
@@ -448,6 +493,7 @@ if [[ $SHOULD_INITDB -eq 1 ]];
 then
     postgresql_initialize
     postgresql_start
+    postgresql_run_init_sql
 fi
 
 # Build schema if asked to do so via commandline argument
