@@ -20,28 +20,16 @@ export SHOULD_INITDB=0
 export SHOULD_BUILDSCHEMA=0
 export IS_SERVER_STARTED=0
 export SHOULD_CLEAN_DATA=0
-
-# PostgreSQL and HammerDB configuration
-export PG_CONFIG="${PG_CONFIG}"
-export PGHOST="${PGHOST:-localhost}"
-export PGPORT="${PGPORT:-5432}"
-
-export PG_DBASE="${PG_DBASE:-tpcc}"
-export PG_DEFAULTDBASE="${PG_DEFAULTDBASE:-postgres}"
-export PG_SUPERUSER="${PG_SUPERUSER:-postgres}"
-export PG_USER="${PG_USER:-tpcc}"
-
-export PG_COUNT_WARE="${PG_COUNT_WARE:-20}"
-export PG_DURATION="${PG_DURATION:-5}"
-export PG_RAMPUP="${PG_RAMPUP:-2}"
-export PG_NUM_VU="${PG_NUM_VU:-20}"
-export PG_VU="${PG_VU:-20}"
-
-# Set a default data directory if we need to perform initdb
-export DATA_DIR_NAME="data.tpcc"
+export ENABLE_CITUS="false"
 
 # SQL script to run after initdb (optional)
 export PG_INIT_SQL=""
+
+# Source benchmark-specific env file if it exists
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+if [[ -f "$SCRIPT_DIR/hammerdb.env" ]]; then
+    source "$SCRIPT_DIR/hammerdb.env"
+fi
 
 
 ## USAGE
@@ -71,6 +59,7 @@ OPTIONS can be:
   -H  [PGHOST]            Host                      [Default: $PGHOST]
   -p  [PGPORT]            Port                      [Default: $PGPORT]
 
+  -c                      Enable Citus compatibility
   -i                      Initialize data directory $DATA_DIR_NAME at path
                           specificed by "-t" option.
                           
@@ -310,7 +299,7 @@ tpcc_build_schema_gen_script()
 {
     echo "Creating build schema script: $SCRIPT_WORKING_DIR/$SCRIPT_BULID_SCHEMA_TCL"
 
-    cat << EOF >> $SCRIPT_WORKING_DIR/$SCRIPT_BULID_SCHEMA_TCL
+    cat << EOF > $SCRIPT_WORKING_DIR/$SCRIPT_BULID_SCHEMA_TCL
 #!/bin/tclsh
 
 puts "SETTING CONFIGURATION"
@@ -325,6 +314,7 @@ diset tpcc pg_user $PG_USER
 diset tpcc pg_superuser $PG_SUPERUSER
 diset tpcc pg_num_vu $PG_NUM_VU
 diset tpcc pg_count_ware $PG_COUNT_WARE
+diset tpcc pg_cituscompat $ENABLE_CITUS
 
 print dict
 
@@ -347,7 +337,7 @@ tpcc_run_gen_script()
 
     echo "Creating benchmark script: $SCRIPT_WORKING_DIR/$SCRIPT_BENCHMARK_TCL"
 
-    cat << EOF >> $SCRIPT_WORKING_DIR/$SCRIPT_BENCHMARK_TCL
+    cat << EOF > $SCRIPT_WORKING_DIR/$SCRIPT_BENCHMARK_TCL
 #!/bin/tclsh
 
 puts "SETTING CONFIGURATION"
@@ -367,6 +357,7 @@ diset tpcc pg_driver timed
 diset tpcc pg_rampup $PG_RAMPUP
 diset tpcc pg_duration $PG_DURATION
 diset tpcc pg_vacuum true
+diset tpcc pg_cituscompat $ENABLE_CITUS
 vuset logtotemp 1
 
 loadscript
@@ -377,9 +368,13 @@ print dict
 puts "BENCHMARK STARTED"
 vucreate
 vurun
-runtimer $wait_timer
+
+set vuoptions runmode timed
+set vuoptions duration $wait_timer
+
+vurun
 vudestroy
-after $wait_timer
+
 puts "BENCHMARK COMPLETE"
 
 EOF
@@ -409,7 +404,7 @@ hammerdb_run_script()
 }
 
 # Check options passed in to the script.
-while getopts "h iSz C:H:p: b:d:D:s:v:w:u:U:r: t:x:" OPTION
+while getopts "h ciSz C:H:p: b:d:D:s:v:w:u:U:r: t:x:" OPTION
 do
     case $OPTION in
         h)
@@ -419,6 +414,9 @@ do
 
         C)
             PG_CONFIG=$OPTARG
+            ;;
+        c)
+            ENABLE_CITUS="true"
             ;;
         H)
             PGHOST=$OPTARG

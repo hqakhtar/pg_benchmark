@@ -29,6 +29,10 @@ export PG_VERSION=""
 
 export PRELOAD_LIBRARY=""
 export PG_INIT_SQL=""
+export INITDB=""
+export BUILD_SCHEMA="true"
+export REMOVE_DATA_DIR=""
+export CITUS_COMPAT_MODE=""
 
 
 ## USAGE
@@ -43,6 +47,10 @@ usage: $0 OPTIONS
 This script runs benchmarking for all of following permutations:
 - PG
 - Any preload shared library passed as an argument.
+
+By default, this script runs against an EXISTING PostgreSQL cluster. To set up
+a new cluster, use the -I (initdb), -S (build schema), and -Z (remove data dir)
+options.
 
 It requires an environment file for sourcing PG and TPCC configuration
 variables. The default file $PG_CONF_FILE available in $SCRIPT_DIR. It also
@@ -64,11 +72,15 @@ OPTIONS can be:
                           files may be created.
 
   -b  [BENCHMARK_Type]  Type of benchmark to run     [Default: $BENCHMARK_TYPE]
+  -c                    Enable Citus compatibility   [Default: not set]
   -e  [PG_CONF_FILE]    PG configuration file.       [Default: $PG_CONF_FILE]
+  -I                    Run initdb                   [Default: not set]
   -i  [ITERATIONS]      Number of iterations         [Default: $ITERATIONS]
   -l  [PRELOAD_LIBRARY] Shared preload library       [Default: none]
   -n  [BENCHMARK_NAME]  Benchmark name               [Default: $BENCHMARK_NAME]
   -r  [PG_INIT_SQL]     SQL script to run after initdb [Default: none]
+  -S                    Build schema                 [Default: set]
+  -Z                    Remove data directory        [Default: not set]
 
 EOF
 
@@ -142,10 +154,30 @@ run_loop()
 		script_logfile=$WORK_DIR/$BENCHMARK_NAME.$benchmark_type.$i.log
 
 		# Run benchmark with initdb, build schema, remove data directory options
+		INITDB_FLAG=""
+		if [[ ! -z "$INITDB" ]]; then
+			INITDB_FLAG="-i"
+		fi
+
+		SCHEMA_FLAG=""
+		if [[ ! -z "$BUILD_SCHEMA" ]]; then
+			SCHEMA_FLAG="-S"
+		fi
+
+		REMOVE_DIR_FLAG=""
+		if [[ ! -z "$REMOVE_DATA_DIR" ]]; then
+			REMOVE_DIR_FLAG="-z"
+		fi
+
+		CITUS_FLAG=""
+		if [[ ! -z "$CITUS_COMPAT_MODE" ]]; then
+			CITUS_FLAG="-c"
+		fi
+
 		if [[ ! -z "$PG_INIT_SQL" ]]; then
-			$SCRIPT_DIR/$BENCHMARK_SCRIPT -i -S -z -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR -r "$PG_INIT_SQL" 2>&1 | tee $script_logfile
+			$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG $SCHEMA_FLAG $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR -r "$PG_INIT_SQL" 2>&1 | tee $script_logfile
 		else
-			$SCRIPT_DIR/$BENCHMARK_SCRIPT -i -S -z -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR 2>&1 | tee $script_logfile
+			$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG $SCHEMA_FLAG $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR 2>&1 | tee $script_logfile
 		fi
 		retval="$?"
 
@@ -184,12 +216,20 @@ run_benchmark()
 }
 
 # Check options passed in.
-while getopts "h C:e:H:i:l:n:r:t:b:" OPTION
+while getopts "h b:cC:e:H:Ii:l:n:r:SZt:" OPTION
 do
     case $OPTION in
         h)
             usage
             exit_script 1
+            ;;
+
+        b)
+            BENCHMARK_TYPE=$OPTARG
+            ;;
+
+        c)
+            CITUS_COMPAT_MODE="true"
             ;;
 
         C)
@@ -202,6 +242,10 @@ do
 
         H)
             HAMMERDB_INSTALL_DIR=$OPTARG
+            ;;
+
+        I)
+            INITDB="true"
             ;;
 
         i)
@@ -220,6 +264,14 @@ do
             PG_INIT_SQL=$OPTARG
             ;;
 
+        S)
+            BUILD_SCHEMA="true"
+            ;;
+
+        Z)
+            REMOVE_DATA_DIR="true"
+            ;;
+
         t)
             WORK_DIR=$OPTARG
             ;;
@@ -236,9 +288,18 @@ validate_args
 
 # Source the environment file(s)
 source $PG_CONF_FILE
-if [[ -f $SCRIPT_DIR/$BENCHMARK_TYPE/$BENCHMARK_TYPE.env ]];
-then
-    source $SCRIPT_DIR/$BENCHMARK_TYPE/$BENCHMARK_TYPE.env
+
+# When running against existing cluster (no initdb), limit iterations to 1
+if [[ -z "$INITDB" ]]; then
+    if [[ $ITERATIONS -gt 1 ]]; then
+        echo "WARNING: Running against existing cluster. Limiting iterations to 1 (was set to $ITERATIONS)." >&2
+        ITERATIONS=1
+    fi
+    # Ensure data directory is not cleaned up when running against existing cluster
+    if [[ ! -z "$REMOVE_DATA_DIR" ]]; then
+        echo "WARNING: -Z flag ignored when running against existing cluster." >&2
+        REMOVE_DATA_DIR=""
+    fi
 fi
 
 # Get the PG version
