@@ -125,6 +125,28 @@ validate_args()
     fi
 }
 
+# Clean up existing benchmark data (only when not running initdb)
+postgresql_cleanup()
+{
+	local iteration="$1"
+	local btype="$2"
+
+	echo "INITDB not set. Running cleanup script before iteration $iteration..."
+	cleanup_log="$WORK_DIR/$BENCHMARK_NAME.cleanup.$btype.$iteration.log"
+
+	cleanup_sql="$SCRIPT_DIR/$BENCHMARK_TYPE/${BENCHMARK_TYPE}_cleanup"
+	if [[ ! -z "$CITUS_COMPAT_MODE" ]]; then
+		cleanup_sql="${cleanup_sql}_citus"
+	fi
+	cleanup_sql="${cleanup_sql}.sql"
+
+	psql -v ON_ERROR_STOP=1 -f "$cleanup_sql" 2>&1 | tee "$cleanup_log"
+	if [[ $? -ne 0 ]]; then
+		echo "Cleanup script failed. See log file [$cleanup_log] for details." >&2
+		exit_script 1
+	fi
+}
+
 # Benchmarking loop
 run_loop()
 {
@@ -145,6 +167,11 @@ run_loop()
 		echo "[$BENCHMARK_NAME: $benchmark_type] Iteration $i of $ITERATIONS"
 		echo "================================================================================"
 		echo
+
+		# If we are not running initdb, clean up existing benchmark data before each iteration
+		if [[ -z "$INITDB" ]]; then
+			postgresql_cleanup "$i" "$benchmark_type"
+		fi
 
 		# Set data and log directory for current iteration
 		data_pg_logs_dir="$WORK_DIR/$benchmark_type/$i"
