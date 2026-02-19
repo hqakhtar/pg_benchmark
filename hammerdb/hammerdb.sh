@@ -307,11 +307,15 @@ puts "SETTING CONFIGURATION"
 dbset db pg
 diset connection pg_host $PGHOST
 diset connection pg_port $PGPORT
+diset connection pg_sslmode prefer
+diset connection pg_azure true
 
 diset tpcc pg_dbase $PG_DBASE
 diset tpcc pg_defaultdbase $PG_DEFAULTDBASE
 diset tpcc pg_user $PG_USER
+diset tpcc pg_pass $PGPASSWORD
 diset tpcc pg_superuser $PG_SUPERUSER
+diset tpcc pg_superuserpass $PGPASSWORD
 diset tpcc pg_num_vu $PG_NUM_VU
 diset tpcc pg_count_ware $PG_COUNT_WARE
 diset tpcc pg_cituscompat $ENABLE_CITUS
@@ -319,7 +323,6 @@ diset tpcc pg_cituscompat $ENABLE_CITUS
 print dict
 
 buildschema
-waittocomplete
 
 puts "BUILD SCHEMA COMPLETE"
 quit
@@ -345,11 +348,15 @@ puts "SETTING CONFIGURATION"
 dbset db pg
 diset connection pg_host $PGHOST
 diset connection pg_port $PGPORT
+diset connection pg_sslmode prefer
+diset connection pg_azure true
 
 diset tpcc pg_dbase $PG_DBASE
 diset tpcc pg_defaultdbase $PG_DEFAULTDBASE
 diset tpcc pg_user $PG_USER
+diset tpcc pg_pass $PGPASSWORD
 diset tpcc pg_superuser $PG_SUPERUSER
+diset tpcc pg_superuserpass $PGPASSWORD
 diset tpcc pg_num_vu $PG_NUM_VU
 diset tpcc pg_count_ware $PG_COUNT_WARE
 
@@ -368,9 +375,6 @@ print dict
 puts "BENCHMARK STARTED"
 vucreate
 vurun
-
-set vuoptions runmode timed
-set vuoptions duration $wait_timer
 
 vurun
 vudestroy

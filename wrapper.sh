@@ -289,19 +289,6 @@ validate_args
 # Source the environment file(s)
 source $PG_CONF_FILE
 
-# When running against existing cluster (no initdb), limit iterations to 1
-if [[ -z "$INITDB" ]]; then
-    if [[ $ITERATIONS -gt 1 ]]; then
-        echo "WARNING: Running against existing cluster. Limiting iterations to 1 (was set to $ITERATIONS)." >&2
-        ITERATIONS=1
-    fi
-    # Ensure data directory is not cleaned up when running against existing cluster
-    if [[ ! -z "$REMOVE_DATA_DIR" ]]; then
-        echo "WARNING: -Z flag ignored when running against existing cluster." >&2
-        REMOVE_DATA_DIR=""
-    fi
-fi
-
 # Get the PG version
 get_pg_version
 
