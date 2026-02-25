@@ -100,7 +100,7 @@ exit_script()
 # Vaildate arguments to ensure that we can safely run the benchmark
 validate_args()
 {
-	if [[ ! -f "$PG_CONF_FILE" ]];
+    if [[ ! -f "$PG_CONF_FILE" ]];
 	then
         echo "Configuration file does not exist. See usage for details" >&2
         usage 1
