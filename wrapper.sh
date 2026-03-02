@@ -242,8 +242,17 @@ run_loop()
 		# If we are not running initdb, run cleanup or maintenance before each iteration
 		if [[ -z "$INITDB" ]]; then
 			if [[ ! -z "$BUILD_SCHEMA_ONCE" ]]; then
+				# Build once: cleanup before first iteration, maintenance for the rest
+				if [[ $i -eq 1 ]]; then
+					postgresql_cleanup "$i" "$benchmark_type"
+				else
+					postgresql_maintenance "$i" "$benchmark_type"
+				fi
+			elif [[ -z "$BUILD_SCHEMA" ]]; then
+				# No schema build: run maintenance
 				postgresql_maintenance "$i" "$benchmark_type"
 			else
+				# Schema rebuilt every iteration: run cleanup
 				postgresql_cleanup "$i" "$benchmark_type"
 			fi
 		fi
