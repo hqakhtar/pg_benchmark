@@ -32,6 +32,7 @@ export PG_INIT_SQL=""
 export INITDB=""
 export BUILD_SCHEMA=""
 export BUILD_SCHEMA_ONCE=""
+export PREPARE_ONLY=""
 export REMOVE_DATA_DIR=""
 export CITUS_COMPAT_MODE=""
 
@@ -81,6 +82,8 @@ OPTIONS can be:
   -n  [BENCHMARK_NAME]  Benchmark name                   [Default: $BENCHMARK_NAME]
   -O                    Build schema once only           [Default: not set]
                         Runs maintenance script.
+  -P                    Prepare only: build schema and   [Default: not set]
+                        exit without running benchmarks.
   -r  [PG_INIT_SQL]     SQL script to run after initdb   [Default: none]
   -S                    New schema every iternation      [Default: not set]
   -Z                    Remove data directory            [Default: not set]
@@ -218,6 +221,52 @@ postgresql_maintenance()
 	fi
 }
 
+# Prepare only: build schema and exit without running benchmarks
+prepare_only()
+{
+	local benchmark_type="$1"
+	local data_pg_logs_dir="$WORK_DIR/$benchmark_type/prepare"
+	local script_logfile="$WORK_DIR/$BENCHMARK_NAME.$benchmark_type.prepare.log"
+
+	mkdir -p $data_pg_logs_dir
+
+	echo
+	echo "================================================================================"
+	echo "[$BENCHMARK_NAME: $benchmark_type] Prepare only - building schema"
+	echo "================================================================================"
+	echo
+
+	INITDB_FLAG=""
+	if [[ ! -z "$INITDB" ]]; then
+		INITDB_FLAG="-i"
+	fi
+
+	REMOVE_DIR_FLAG=""
+	if [[ ! -z "$REMOVE_DATA_DIR" ]]; then
+		REMOVE_DIR_FLAG="-z"
+	fi
+
+	CITUS_FLAG=""
+	if [[ ! -z "$CITUS_COMPAT_MODE" ]]; then
+		CITUS_FLAG="-c"
+	fi
+
+	if [[ ! -z "$PG_INIT_SQL" ]]; then
+		$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG -S $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR -r "$PG_INIT_SQL" 2>&1 | tee $script_logfile
+	else
+		$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG -S $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR 2>&1 | tee $script_logfile
+	fi
+
+	if [[ $? -ne 0 ]]; then
+		echo "Prepare failed. See log file [$script_logfile] for details." >&2
+		exit_script 1
+	fi
+
+	echo
+	echo "Schema prepared successfully. Exiting without running benchmarks."
+	exit_script 0
+}
+
 # Benchmarking loop
 run_loop()
 {
@@ -328,7 +377,7 @@ run_benchmark()
 }
 
 # Check options passed in.
-while getopts "h b:cC:e:H:Ii:l:n:Or:SZt:" OPTION
+while getopts "h b:cC:e:H:Ii:l:n:OPr:SZt:" OPTION
 do
     case $OPTION in
         h)
@@ -377,6 +426,10 @@ do
             BUILD_SCHEMA_ONCE="true"
             ;;
 
+        P)
+            PREPARE_ONLY="true"
+            ;;
+
         r)
             PG_INIT_SQL=$OPTARG
             ;;
@@ -411,6 +464,16 @@ sanity_check
 
 # Get the PG version
 get_pg_version
+
+# If prepare-only mode, build schema and exit
+if [[ ! -z "$PREPARE_ONLY" ]]; then
+    benchmark_type="PG-$PG_VERSION"
+    if [[ ! -z "$PRELOAD_LIBRARY" ]]; then
+        export PG_INITDB_OPTS="$PG_INITDB_OPTS_BASE -c shared_preload_libraries='"$PRELOAD_LIBRARY"'"
+        benchmark_type="$benchmark_type-$PRELOAD_LIBRARY"
+    fi
+    prepare_only "$benchmark_type"
+fi
 
 # Run benchmarks
 run_benchmark
