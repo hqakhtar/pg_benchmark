@@ -93,26 +93,14 @@ END $$;
 -- ------------------------------------------------------------
 -- B) VACUUM / ANALYZE (does not remove data)
 -- ------------------------------------------------------------
-DO $$
-DECLARE r record;
-BEGIN
-  FOR r IN
-    SELECT n.nspname AS schemaname, c.relname AS relname
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public'
-      AND c.relkind IN ('r','p')  -- ordinary + partitioned tables
-  LOOP
-    BEGIN
-      EXECUTE format('VACUUM (ANALYZE) %I.%I', r.schemaname, r.relname);
-    EXCEPTION
-      WHEN insufficient_privilege THEN
-        RAISE NOTICE 'Skipping VACUUM on %.%: insufficient privilege', r.schemaname, r.relname;
-      WHEN others THEN
-        RAISE NOTICE 'Skipping VACUUM on %.%: %', r.schemaname, r.relname, SQLERRM;
-    END;
-  END LOOP;
-END $$;
+-- VACUUM cannot run inside a transaction block, so we use \gexec
+-- to generate and execute each VACUUM statement as a top-level command.
+SELECT format('VACUUM (ANALYZE) %I.%I;', n.nspname, c.relname)
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relkind IN ('r','p')
+\gexec
 
 -- Optional: update planner stats more broadly (no data changes)
 -- ANALYZE;
