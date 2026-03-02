@@ -30,7 +30,8 @@ export PG_VERSION=""
 export PRELOAD_LIBRARY=""
 export PG_INIT_SQL=""
 export INITDB=""
-export BUILD_SCHEMA="true"
+export BUILD_SCHEMA=""
+export BUILD_SCHEMA_ONCE=""
 export REMOVE_DATA_DIR=""
 export CITUS_COMPAT_MODE=""
 
@@ -65,22 +66,24 @@ OPTIONS can be:
 
   -h  Show this message
 
-  -C  [PG_CONFIG]       pg_config path               [REQUIRED]
-  -H                    HammerDB installation dir    [REQUIRED]
-  -t                    Script working folder        [REQUIRED]
+  -C  [PG_CONFIG]       pg_config path                   [REQUIRED]
+  -H                    HammerDB installation dir        [REQUIRED]
+  -t                    Script working folder            [REQUIRED]
                         * a folder where data directory and relevant log
                           files may be created.
 
-  -b  [BENCHMARK_Type]  Type of benchmark to run     [Default: $BENCHMARK_TYPE]
-  -c                    Enable Citus compatibility   [Default: not set]
-  -e  [PG_CONF_FILE]    PG configuration file.       [Default: $PG_CONF_FILE]
-  -I                    Run initdb                   [Default: not set]
-  -i  [ITERATIONS]      Number of iterations         [Default: $ITERATIONS]
-  -l  [PRELOAD_LIBRARY] Shared preload library       [Default: none]
-  -n  [BENCHMARK_NAME]  Benchmark name               [Default: $BENCHMARK_NAME]
-  -r  [PG_INIT_SQL]     SQL script to run after initdb [Default: none]
-  -S                    Build schema                 [Default: set]
-  -Z                    Remove data directory        [Default: not set]
+  -b  [BENCHMARK_Type]  Type of benchmark to run         [Default: $BENCHMARK_TYPE]
+  -c                    Enable Citus compatibility       [Default: not set]
+  -e  [PG_CONF_FILE]    PG configuration file.           [Default: $PG_CONF_FILE]
+  -I                    Run initdb                       [Default: not set]
+  -i  [ITERATIONS]      Number of iterations             [Default: $ITERATIONS]
+  -l  [PRELOAD_LIBRARY] Shared preload library           [Default: none]
+  -n  [BENCHMARK_NAME]  Benchmark name                   [Default: $BENCHMARK_NAME]
+  -O                    Build schema once only           [Default: not set]
+                        Runs maintenance script.
+  -r  [PG_INIT_SQL]     SQL script to run after initdb   [Default: none]
+  -S                    New schema every iternation      [Default: not set]
+  -Z                    Remove data directory            [Default: not set]
 
 EOF
 
@@ -95,6 +98,52 @@ exit_script()
 {
     # Exit with a given return code or 0 if none are provided.
     exit ${1:-0}
+}
+
+# Sanity check environment before running benchmarks
+sanity_check()
+{
+    local errors=0
+
+    # PG_NUM_VU (schema build VUs) must be less than warehouse count
+    if [[ "$PG_NUM_VU" -ge "$PG_COUNT_WARE" ]]; then
+        echo "SANITY CHECK FAILED: PG_NUM_VU ($PG_NUM_VU) must be less than PG_COUNT_WARE ($PG_COUNT_WARE)" >&2
+        errors=$((errors + 1))
+    fi
+
+    # Check ulimit -n (open files) is more than 5x PG_NUM_VU and 5x PG_VU
+    local open_files
+    open_files=$(ulimit -n)
+    if [[ "$open_files" != "unlimited" ]]; then
+        local min_for_num_vu=$((PG_NUM_VU * 5))
+        local min_for_vu=$((PG_VU * 5))
+
+        if [[ "$open_files" -le "$min_for_num_vu" ]]; then
+            echo "SANITY CHECK FAILED: ulimit -n ($open_files) must be more than 5x PG_NUM_VU ($PG_NUM_VU), i.e. > $min_for_num_vu" >&2
+            errors=$((errors + 1))
+        fi
+
+        if [[ "$open_files" -le "$min_for_vu" ]]; then
+            echo "SANITY CHECK FAILED: ulimit -n ($open_files) must be more than 5x PG_VU ($PG_VU), i.e. > $min_for_vu" >&2
+            errors=$((errors + 1))
+        fi
+    fi
+
+    # Check ulimit -u (max user processes) is large enough
+    local max_procs
+    max_procs=$(ulimit -u)
+    local min_procs=4096
+    if [[ "$max_procs" != "unlimited" && "$max_procs" -lt "$min_procs" ]]; then
+        echo "SANITY CHECK FAILED: ulimit -u ($max_procs) is too low; should be at least $min_procs or unlimited" >&2
+        errors=$((errors + 1))
+    fi
+
+    if [[ $errors -gt 0 ]]; then
+        echo "Sanity check failed with $errors error(s). Aborting." >&2
+        exit_script 1
+    fi
+
+    echo "Sanity check passed."
 }
 
 # Vaildate arguments to ensure that we can safely run the benchmark
@@ -147,6 +196,28 @@ postgresql_cleanup()
 	fi
 }
 
+# Run maintenance script between iterations (used with -O)
+postgresql_maintenance()
+{
+	local iteration="$1"
+	local btype="$2"
+
+	echo "Running maintenance script before iteration $iteration..."
+	maintenance_log="$WORK_DIR/$BENCHMARK_NAME.maintenance.$btype.$iteration.log"
+
+	maintenance_sql="$SCRIPT_DIR/$BENCHMARK_TYPE/${BENCHMARK_TYPE}_maintenance"
+	if [[ ! -z "$CITUS_COMPAT_MODE" ]]; then
+		maintenance_sql="${maintenance_sql}_citus"
+	fi
+	maintenance_sql="${maintenance_sql}.sql"
+
+	psql -v ON_ERROR_STOP=1 -f "$maintenance_sql" 2>&1 | tee "$maintenance_log"
+	if [[ $? -ne 0 ]]; then
+		echo "Maintenance script failed. See log file [$maintenance_log] for details." >&2
+		exit_script 1
+	fi
+}
+
 # Benchmarking loop
 run_loop()
 {
@@ -168,9 +239,13 @@ run_loop()
 		echo "================================================================================"
 		echo
 
-		# If we are not running initdb, clean up existing benchmark data before each iteration
+		# If we are not running initdb, run cleanup or maintenance before each iteration
 		if [[ -z "$INITDB" ]]; then
-			postgresql_cleanup "$i" "$benchmark_type"
+			if [[ ! -z "$BUILD_SCHEMA_ONCE" ]]; then
+				postgresql_maintenance "$i" "$benchmark_type"
+			else
+				postgresql_cleanup "$i" "$benchmark_type"
+			fi
 		fi
 
 		# Set data and log directory for current iteration
@@ -186,11 +261,6 @@ run_loop()
 			INITDB_FLAG="-i"
 		fi
 
-		SCHEMA_FLAG=""
-		if [[ ! -z "$BUILD_SCHEMA" ]]; then
-			SCHEMA_FLAG="-S"
-		fi
-
 		REMOVE_DIR_FLAG=""
 		if [[ ! -z "$REMOVE_DATA_DIR" ]]; then
 			REMOVE_DIR_FLAG="-z"
@@ -199,6 +269,12 @@ run_loop()
 		CITUS_FLAG=""
 		if [[ ! -z "$CITUS_COMPAT_MODE" ]]; then
 			CITUS_FLAG="-c"
+		fi
+
+		# Only pass build schema on the first iteration when -O (build once) is set
+		SCHEMA_FLAG="$BUILD_SCHEMA"
+		if [[ ! -z "$BUILD_SCHEMA_ONCE" && $i -gt 1 ]]; then
+			SCHEMA_FLAG=""
 		fi
 
 		if [[ ! -z "$PG_INIT_SQL" ]]; then
@@ -243,7 +319,7 @@ run_benchmark()
 }
 
 # Check options passed in.
-while getopts "h b:cC:e:H:Ii:l:n:r:SZt:" OPTION
+while getopts "h b:cC:e:H:Ii:l:n:Or:SZt:" OPTION
 do
     case $OPTION in
         h)
@@ -287,12 +363,17 @@ do
             BENCHMARK_NAME=$OPTARG
             ;;
 
+        O)
+            BUILD_SCHEMA="-S"
+            BUILD_SCHEMA_ONCE="true"
+            ;;
+
         r)
             PG_INIT_SQL=$OPTARG
             ;;
 
         S)
-            BUILD_SCHEMA="true"
+            BUILD_SCHEMA="-S"
             ;;
 
         Z)
@@ -315,6 +396,9 @@ validate_args
 
 # Source the environment file(s)
 source $PG_CONF_FILE
+
+# Run sanity checks before proceeding
+sanity_check
 
 # Get the PG version
 get_pg_version
