@@ -376,10 +376,11 @@ puts "BENCHMARK STARTED"
 vucreate
 vurun
 
-vurun
+waittocomplete
 vudestroy
 
 puts "BENCHMARK COMPLETE"
+quit
 
 EOF
 }
