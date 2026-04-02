@@ -311,7 +311,8 @@ dbset db pg
 diset connection pg_host $PGHOST
 diset connection pg_port $PGPORT
 diset connection pg_sslmode prefer
-diset connection pg_azure true
+diset connection pg_azure_citus true
+diset connection pg_citus_loadbalancer 7432
 
 diset tpcc pg_dbase $PG_DBASE
 diset tpcc pg_defaultdbase $PG_DEFAULTDBASE
@@ -351,7 +352,8 @@ dbset db pg
 diset connection pg_host $PGHOST
 diset connection pg_port $PGPORT
 diset connection pg_sslmode prefer
-diset connection pg_azure true
+diset connection pg_azure_citus true
+diset connection pg_citus_loadbalancer 7432
 
 diset tpcc pg_dbase $PG_DBASE
 diset tpcc pg_defaultdbase $PG_DEFAULTDBASE
