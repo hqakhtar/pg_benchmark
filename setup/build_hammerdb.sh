@@ -13,6 +13,6 @@ echo "Building HammerDB from source for pg only."
 echo "--> Commenting out other database drivers in Setup/HammerDB-Linux.bawt"
 sed -i -E 's/^(Setup (ora|mariatcl|oratcl|mysqltcl|db2tcl))/#\1/' Setup/HammerDB-Linux.bawt
 
-./Build-Linux.sh x64 Setup/HammerDB-Linux.bawt complete --list
+./Build-Linux.sh x64 Setup/HammerDB-Linux.bawt complete all
 
 popd

@@ -21,6 +21,7 @@ export SHOULD_BUILDSCHEMA=0
 export IS_SERVER_STARTED=0
 export SHOULD_CLEAN_DATA=0
 export ENABLE_CITUS="false"
+export PREPARE_ONLY=0
 
 # SQL script to run after initdb (optional)
 export PG_INIT_SQL=""
@@ -65,6 +66,8 @@ OPTIONS can be:
                           
                           * PG_INITDB_OPTS environment variable is passed to
                             set PostgreSQL at start time.
+  -P                      Prepare only: build schema and
+                          exit without running benchmarks
   -S                      Build tpcc schema
 
 
@@ -325,7 +328,6 @@ print dict
 buildschema
 
 puts "BUILD SCHEMA COMPLETE"
-quit
 EOF
 }
 
@@ -376,12 +378,9 @@ puts "BENCHMARK STARTED"
 vucreate
 vurun
 
-waittocomplete
 vudestroy
 
 puts "BENCHMARK COMPLETE"
-quit
-
 EOF
 }
 
@@ -409,7 +408,7 @@ hammerdb_run_script()
 }
 
 # Check options passed in to the script.
-while getopts "h ciSz C:H:p: b:d:D:s:v:w:u:U:r: t:x:" OPTION
+while getopts "h ciPSz C:H:p: b:d:D:s:v:w:u:U:r: t:x:" OPTION
 do
     case $OPTION in
         h)
@@ -432,6 +431,9 @@ do
 
         i)
             SHOULD_INITDB=1
+            ;;
+        P)
+            PREPARE_ONLY=1
             ;;
         S)
             SHOULD_BUILDSCHEMA=1
@@ -506,9 +508,12 @@ then
     tpcc_build_schema
 fi
 
-# Generate script and run benchmark
-tpcc_run_gen_script
-tpcc_run_benchmark
+# Generate script and run benchmark unless prepare-only mode
+if [[ $PREPARE_ONLY -eq 0 ]];
+then
+    tpcc_run_gen_script
+    tpcc_run_benchmark
+fi
 
 # Stop the server if we started it.
 if [[ $SHOULD_INITDB -eq 1 ]];

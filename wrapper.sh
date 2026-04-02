@@ -204,8 +204,12 @@ postgresql_maintenance()
 {
 	local iteration="$1"
 	local btype="$2"
+    local sleep_duration=60
 
 	echo "Running maintenance script before iteration $iteration..."
+    echo "Sleeping for $sleep_duration seconds to allow the system to stabilize before running maintenance tasks..."
+    sleep $sleep_duration
+
 	maintenance_log="$WORK_DIR/$BENCHMARK_NAME.maintenance.$btype.$iteration.log"
 
 	maintenance_sql="$SCRIPT_DIR/$BENCHMARK_TYPE/${BENCHMARK_TYPE}_maintenance"
@@ -219,6 +223,9 @@ postgresql_maintenance()
 		echo "Maintenance script failed. See log file [$maintenance_log] for details." >&2
 		exit_script 1
 	fi
+
+    echo "Sleeping for $sleep_duration seconds to allow the system to stabilize after running maintenance tasks..."
+    sleep $sleep_duration
 }
 
 # Prepare only: build schema and exit without running benchmarks
@@ -252,9 +259,9 @@ prepare_only()
 	fi
 
 	if [[ ! -z "$PG_INIT_SQL" ]]; then
-		$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG -S $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR -r "$PG_INIT_SQL" 2>&1 | tee $script_logfile
+		$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG -S -P $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR -r "$PG_INIT_SQL" 2>&1 | tee $script_logfile
 	else
-		$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG -S $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR 2>&1 | tee $script_logfile
+		$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG -S -P $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR 2>&1 | tee $script_logfile
 	fi
 
 	if [[ $? -ne 0 ]]; then
