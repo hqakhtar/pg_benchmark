@@ -1,5 +1,8 @@
 CREATE SCHEMA IF NOT EXISTS citus_utils;
+Do $$
+BEGIN
 RAISE NOTICE 'citus_utils schema created or already exists.';
+END $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION citus_utils.get_dist_column_count_per_shard(
     table_name text,
@@ -42,7 +45,10 @@ BEGIN
     );
 END;
 $$ LANGUAGE plpgsql;
+Do $$
+BEGIN
 RAISE NOTICE 'citus_utils.get_dist_column_count_per_shard function created or replaced.';
+END $$ LANGUAGE plpgsql;
 
 
 CREATE OR REPLACE FUNCTION citus_utils.get_dist_column_count_per_node(
@@ -66,7 +72,10 @@ BEGIN
     ORDER BY st.nodename, st.nodeport;
 END;
 $$ LANGUAGE plpgsql;
+Do $$
+BEGIN
 RAISE NOTICE 'citus_utils.get_dist_column_count_per_node function created or replaced.';
+END $$ LANGUAGE plpgsql;
 
 
 CREATE OR REPLACE FUNCTION citus_utils.get_shard_size(
@@ -116,7 +125,10 @@ BEGIN
         END;
 END;
 $$ LANGUAGE plpgsql;
+Do $$
+BEGIN
 RAISE NOTICE 'citus_utils.get_shard_size function created or replaced.';
+END $$ LANGUAGE plpgsql;
 
 
 CREATE OR REPLACE FUNCTION citus_utils.get_shard_location_for_key(
@@ -178,5 +190,8 @@ BEGIN
 
 END;
 $$ LANGUAGE plpgsql STABLE;
+Do $$
+BEGIN
 RAISE NOTICE 'citus_utils.get_shard_location_for_key function created or replaced.';
+END $$ LANGUAGE plpgsql;
 
