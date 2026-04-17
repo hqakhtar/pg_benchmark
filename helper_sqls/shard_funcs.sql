@@ -38,7 +38,7 @@ BEGIN
             COUNT(DISTINCT st.dist_value)::bigint AS dist_value_count
         FROM shard_table st
         GROUP BY st.nodename, st.nodeport, st.shardid
-        ORDER BY dist_value DESC, st.nodename, st.nodeport, st.shardid
+        ORDER BY st.nodename, st.nodeport, st.shardid
         ',
         distribution_column,
         table_name
@@ -69,7 +69,7 @@ BEGIN
         SUM(st.dist_value_count)::bigint AS total_dist_value_count
     FROM citus_utils.get_dist_column_count_per_shard(table_name, distribution_column) st
     GROUP BY st.nodename, st.nodeport
-    ORDER BY total_dist_value_count DESC, st.nodename, st.nodeport;
+    ORDER BY st.nodename, st.nodeport;
 END;
 $$ LANGUAGE plpgsql;
 Do $$
@@ -117,7 +117,6 @@ BEGIN
             ELSE NULL::text
         END
     ORDER BY
-        shard_size desc,
         s.nodename,
         s.nodeport,
         CASE
@@ -197,6 +196,6 @@ RAISE NOTICE 'citus_utils.get_shard_location_for_key function created or replace
 END $$ LANGUAGE plpgsql;
 
 
-SELECT * FROM citus_utils.get_dist_column_count_per_shard('warehouse', 'w_id');
-SELECT * FROM citus_utils.get_dist_column_count_per_node('warehouse', 'w_id');
-SELECT * FROM citus_utils.get_shard_size();
+SELECT * FROM citus_utils.get_dist_column_count_per_shard('warehouse', 'w_id') ORDER BY dist_value_count DESC, nodename, nodeport, shardid;
+SELECT * FROM citus_utils.get_dist_column_count_per_node('warehouse', 'w_id') ORDER BY dist_value_count DESC, nodename, nodeport;
+SELECT * FROM citus_utils.get_shard_size() ORDER BY shard_size DESC, nodename, nodeport, table_name;
