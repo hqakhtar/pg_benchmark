@@ -1,4 +1,5 @@
 CREATE SCHEMA IF NOT EXISTS citus_utils;
+RAISE NOTICE 'citus_utils schema created or already exists.';
 
 CREATE OR REPLACE FUNCTION citus_utils.get_dist_column_count_per_shard(
     table_name text,
@@ -22,7 +23,7 @@ BEGIN
                 t.%1$I AS dist_value
             FROM %2$I t
             JOIN pg_dist_placement p
-              ON p.shardid = get_shard_id_for_distribution_column(%3$L, t.%1$I)
+              ON p.shardid = get_shard_id_for_distribution_column(%2$L, t.%1$I)
             JOIN pg_dist_node n
               ON n.groupid = p.groupid
             WHERE n.noderole = ''primary''
@@ -37,11 +38,11 @@ BEGIN
         ORDER BY st.nodename, st.nodeport, st.shardid
         ',
         distribution_column,
-        table_name,
         table_name
     );
 END;
 $$ LANGUAGE plpgsql;
+RAISE NOTICE 'citus_utils.get_dist_column_count_per_shard function created or replaced.';
 
 
 CREATE OR REPLACE FUNCTION citus_utils.get_dist_column_count_per_node(
@@ -65,3 +66,117 @@ BEGIN
     ORDER BY st.nodename, st.nodeport;
 END;
 $$ LANGUAGE plpgsql;
+RAISE NOTICE 'citus_utils.get_dist_column_count_per_node function created or replaced.';
+
+
+CREATE OR REPLACE FUNCTION citus_utils.get_shard_size(
+    p_table_name text DEFAULT NULL,
+    p_colocation_id int DEFAULT 1
+)
+RETURNS TABLE (
+    nodename text,
+    nodeport integer,
+    table_name text,
+    shard_size bigint,
+    shard_nblocks bigint,
+    shard_size_pretty text
+)
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        s.nodename::text,
+        s.nodeport::integer,
+        CASE
+            WHEN p_table_name IS NOT NULL THEN s.table_name::text
+            ELSE NULL::text
+        END AS table_name,
+        SUM(s.shard_size)::bigint AS shard_size,
+        (SUM(s.shard_size) / 8192)::bigint AS shard_nblocks,
+        pg_size_pretty(SUM(s.shard_size))::text AS shard_size_pretty
+    FROM citus_shards s
+    WHERE s.colocation_id = p_colocation_id
+      AND (
+          p_table_name IS NULL
+          OR s.table_name = p_table_name::regclass
+      )
+    GROUP BY
+        s.nodename,
+        s.nodeport,
+        CASE
+            WHEN p_table_name IS NOT NULL THEN s.table_name::text
+            ELSE NULL::text
+        END
+    ORDER BY
+        s.nodename,
+        s.nodeport,
+        CASE
+            WHEN p_table_name IS NOT NULL THEN s.table_name::text
+            ELSE NULL::text
+        END;
+END;
+$$ LANGUAGE plpgsql;
+RAISE NOTICE 'citus_utils.get_shard_size function created or replaced.';
+
+
+CREATE OR REPLACE FUNCTION citus_utils.get_shard_location_for_key(
+    p_table_name text,
+    p_distribution_column text,
+    p_distribution_value anyelement
+)
+RETURNS TABLE (
+    nodename text,
+    nodeport integer,
+    table_name text,
+    shard_table_name text,
+    shard_id bigint
+)
+AS $$
+DECLARE
+    v_actual_dist_col text;
+    v_shard_id bigint;
+BEGIN
+    -- Validate distributed table + distribution column
+    SELECT column_to_column_name(logicalrelid, partkey)
+    INTO v_actual_dist_col
+    FROM pg_dist_partition
+    WHERE logicalrelid = p_table_name::regclass;
+
+    IF v_actual_dist_col IS NULL THEN
+        RAISE EXCEPTION 'Table % is not a distributed table', p_table_name;
+    END IF;
+
+    IF v_actual_dist_col <> p_distribution_column THEN
+        RAISE EXCEPTION
+            'Column % is not the distribution column for table %. Actual distribution column is %',
+            p_distribution_column,
+            p_table_name,
+            v_actual_dist_col;
+    END IF;
+
+    -- Determine shard id for the provided distribution key value
+    v_shard_id :=
+        get_shard_id_for_distribution_column(
+            p_table_name,
+            p_distribution_value
+        );
+
+    -- Return shard placement
+    RETURN QUERY
+    SELECT
+        n.nodename::text,
+        n.nodeport::integer,
+        p_table_name::text,
+        format('%s_%s', p_table_name, v_shard_id)::text,
+        v_shard_id
+    FROM pg_dist_placement p
+    JOIN pg_dist_node n
+      ON n.groupid = p.groupid
+    WHERE p.shardid = v_shard_id
+      AND n.noderole = 'primary'
+    ORDER BY n.nodename, n.nodeport;
+
+END;
+$$ LANGUAGE plpgsql STABLE;
+RAISE NOTICE 'citus_utils.get_shard_location_for_key function created or replaced.';
+
