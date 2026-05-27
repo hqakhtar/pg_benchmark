@@ -324,6 +324,7 @@ diset tpcc pg_superuser $PG_SUPERUSER
 diset tpcc pg_superuserpass $PGPASSWORD
 diset tpcc pg_num_vu $PG_NUM_VU
 diset tpcc pg_count_ware $PG_COUNT_WARE
+diset tpcc pg_first_ware $PG_FIRST_WARE
 diset tpcc pg_cituscompat $ENABLE_CITUS
 
 print dict
