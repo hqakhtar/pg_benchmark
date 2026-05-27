@@ -21,6 +21,7 @@ export SHOULD_BUILDSCHEMA=0
 export IS_SERVER_STARTED=0
 export SHOULD_CLEAN_DATA=0
 export ENABLE_CITUS="false"
+export CITUS_LB_PORT="${CITUS_LB_PORT:-7432}"
 export PREPARE_ONLY=0
 
 # SQL script to run after initdb (optional)
@@ -311,8 +312,9 @@ dbset db pg
 diset connection pg_host $PGHOST
 diset connection pg_port $PGPORT
 diset connection pg_sslmode prefer
-diset connection pg_azure_citus true
-diset connection pg_citus_loadbalancer 7432
+diset connection pg_azure_citus $ENABLE_CITUS
+diset connection pg_citus_loadbalancer $CITUS_LB_PORT
+diset connection pg_citus_direct_workers true
 
 diset tpcc pg_dbase $PG_DBASE
 diset tpcc pg_defaultdbase $PG_DEFAULTDBASE
@@ -325,6 +327,12 @@ diset tpcc pg_count_ware $PG_COUNT_WARE
 diset tpcc pg_cituscompat $ENABLE_CITUS
 
 print dict
+
+giset virtual_user_options virtual_users $PG_NUM_VU
+giset virtual_user_options user_delay 1
+vuset delay 1     # affects buildschema dispatch — keep
+
+print generic            ;# should now show updated values
 
 buildschema
 
@@ -352,8 +360,11 @@ dbset db pg
 diset connection pg_host $PGHOST
 diset connection pg_port $PGPORT
 diset connection pg_sslmode prefer
-diset connection pg_azure_citus true
-diset connection pg_citus_loadbalancer 7432
+diset connection pg_azure_citus $ENABLE_CITUS
+diset connection pg_citus_loadbalancer $CITUS_LB_PORT
+diset connection pg_citus_direct_workers true
+
+diset generic user_delay 1
 
 diset tpcc pg_dbase $PG_DBASE
 diset tpcc pg_defaultdbase $PG_DEFAULTDBASE
@@ -370,6 +381,15 @@ diset tpcc pg_duration $PG_DURATION
 diset tpcc pg_vacuum true
 diset tpcc pg_cituscompat $ENABLE_CITUS
 vuset logtotemp 1
+
+print dict
+
+giset virtual_user_options virtual_users $PG_VU
+giset virtual_user_options user_delay 1
+vuset delay 1     # affects buildschema dispatch — keep
+
+print generic            ;# should now show updated values
+
 
 loadscript
 vuset vu $PG_VU

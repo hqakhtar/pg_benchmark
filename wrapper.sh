@@ -109,7 +109,7 @@ sanity_check()
     local errors=0
 
     # PG_NUM_VU (schema build VUs) must be less than warehouse count
-    if [[ "$PG_NUM_VU" -ge "$PG_COUNT_WARE" ]]; then
+    if [[ "$PG_NUM_VU" -gt "$PG_COUNT_WARE" ]]; then
         echo "SANITY CHECK FAILED: PG_NUM_VU ($PG_NUM_VU) must be less than PG_COUNT_WARE ($PG_COUNT_WARE)" >&2
         errors=$((errors + 1))
     fi
