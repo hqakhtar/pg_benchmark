@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
 set -u
 
-if [ "$#" -ne 2 ]; then
-  echo "Usage: $0 <hosts_file> <log_folder>"
-  echo "Example: $0 /path/to/hosts.txt /path/to/logs"
+if [ "$#" -ne 3 ]; then
+  echo "Usage: $0 <hosts_file> <log_folder> <script to run>"
+  echo "Example: $0 /path/to/hosts.txt /path/to/logs /path/to/bash_script"
   exit 1
 fi
 
 HOSTS_FILE="$1"
 LOG_DIR="$2"
+SETUP_SCRIPT="$3"
 
 # Directory where this orchestration script resides,
 # regardless of where you call it from.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-SETUP_SCRIPT="$SCRIPT_DIR/setup_runner_ubuntu.sh"
 
 if [ ! -f "$HOSTS_FILE" ]; then
   echo "Error: hosts file not found: $HOSTS_FILE"
@@ -37,7 +36,7 @@ while IFS= read -r host || [ -n "$host" ]; do
   safe_host="$(echo "$host" | tr -c 'a-zA-Z0-9._-' '_')"
   log_file="$LOG_DIR/${safe_host}.log"
 
-  echo "Starting setup on $host"
+  echo "Starting running script $SETUP_SCRIPT on $host"
   echo "Log: $log_file"
 
   ssh -o StrictHostKeyChecking=accept-new \
