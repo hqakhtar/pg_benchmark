@@ -1,0 +1,23 @@
+#!/bin/bash
+
+export PGHOST=hamid-citus-hammerdb-c4-n8.postgres.database.azure.com
+export PGPORT=5432
+export PGPASSWORD=Admin1234
+export CITUS_LB_PORT=7432
+
+export PGUSER=demouser
+export PG_SUPERUSER=$PGUSER
+export PG_USER=$PGUSER
+
+export PGDATABASE=postgres
+export PG_DBASE=$PGDATABASE
+export PG_DEFAULTDBASE=$PGDATABASE
+
+export PG_COUNT_WARE=100
+export PG_FIRST_WARE=101
+export PG_NUM_VU=50
+export PG_VU=10
+
+export PG_DURATION=1
+export PG_RAMPUP=1
+

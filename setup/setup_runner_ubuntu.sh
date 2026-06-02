@@ -25,3 +25,6 @@ bindkey -m ^[[6~ stuff ^f   # PgDn in copy mode
 EOL
 
 echo "ulimit -n 65536" >> ~/.bashrc
+
+git clone https://github.com/hqakhtar/pg_benchmark.git
+
