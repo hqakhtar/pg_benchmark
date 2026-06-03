@@ -1,0 +1,32 @@
+# Variables for runner_setup.yml
+# Edit these to match your environment before running the playbook.
+
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+pg_version: "17"
+
+# ── Remote user ───────────────────────────────────────────────────────────────
+# Home directory on the runner VMs (tasks that write dotfiles use this).
+runner_user: "{{ ansible_user }}"
+runner_home: "/home/{{ runner_user }}"
+
+# ── pg_benchmark repo ────────────────────────────────────────────────────────
+pg_benchmark_repo: "https://github.com/hqakhtar/pg_benchmark.git"
+pg_benchmark_dest: "{{ runner_home }}/pg_benchmark"
+pg_benchmark_branch: "main"
+
+# Set true to run a git pull/update on the remote pg_benchmark checkout.
+update_pg_benchmark: false
+
+# Set true to copy local myenv.sh to each runner.
+update_myenv: false
+myenv_local_path: "{{ playbook_dir }}/../../myenv.sh"
+myenv_remote_path: "{{ pg_benchmark_dest }}/myenv.sh"
+
+# ── HammerDB tarball (optional) ───────────────────────────────────────────────
+# Set install_hammerdb: true and point local_hammerdb_tarball at the built
+# tarball to have Ansible scp + extract it on every runner.
+# Leave install_hammerdb: false to skip.
+install_hammerdb: false
+local_hammerdb_tarball: "/home/virus/sources/HammerDB/Build/BawtBuild/Linux/x64/Release/Distribution/HammerDB-5.0-Prod-Linux.tar.gz"
+hammerdb_dest: "{{ runner_home }}"
+hammerdb_dir_name: "HammerDB-5.0"

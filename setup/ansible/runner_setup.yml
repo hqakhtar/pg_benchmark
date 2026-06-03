@@ -1,0 +1,185 @@
+---
+# Runner VM setup playbook.
+# Mirrors setup_runner_ubuntu.sh declaratively.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini runner_setup.yml
+#
+# Dry-run (no changes made):
+#   ansible-playbook -i inventory.ini runner_setup.yml --check
+#
+# Limit to a single host:
+#   ansible-playbook -i inventory.ini runner_setup.yml --limit citus-runner-m1
+#
+# Override a variable at run time:
+#   ansible-playbook -i inventory.ini runner_setup.yml -e pg_version=16
+#
+# Update only pg_benchmark repo (git pull behavior):
+#   ansible-playbook -i inventory.ini runner_setup.yml --tags pg_benchmark_update -e update_pg_benchmark=true
+#
+# Update only myenv.sh on all runners:
+#   ansible-playbook -i inventory.ini runner_setup.yml --tags myenv -e update_myenv=true
+
+- hosts: runners
+  become: true          # sudo for system-level tasks
+  vars_files:
+    - vars.yml
+
+  tasks:
+
+    # ── System update ──────────────────────────────────────────────────────────
+
+    - name: Update apt cache and upgrade all packages
+      apt:
+        update_cache: true
+        upgrade: dist
+        cache_valid_time: 3600   # skip cache refresh if done within the hour
+
+    - name: Install prerequisites
+      apt:
+        name:
+          - curl
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
+
+    # ── PostgreSQL PGDG repository ─────────────────────────────────────────────
+
+    - name: Create PGDG keyring directory
+      file:
+        path: /usr/share/postgresql-common/pgdg
+        state: directory
+        mode: '0755'
+
+    - name: Download and install PostgreSQL PGDG signing key
+      shell: |
+        curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+          | gpg --dearmor -o /usr/share/postgresql-common/pgdg/pgdg.gpg
+      args:
+        creates: /usr/share/postgresql-common/pgdg/pgdg.gpg   # idempotent: skip if already present
+
+    - name: Add PostgreSQL PGDG apt repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/postgresql-common/pgdg/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+        state: present
+        filename: pgdg
+
+    - name: Update apt cache after adding PGDG repo
+      apt:
+        update_cache: true
+
+    # ── Install PostgreSQL ─────────────────────────────────────────────────────
+
+    - name: Install PostgreSQL {{ pg_version }}
+      apt:
+        name:
+          - "postgresql-{{ pg_version }}"
+          - "postgresql-client-{{ pg_version }}"
+          - "postgresql-server-dev-{{ pg_version }}"
+        state: present
+
+    - name: Stop and disable postgresql service
+      systemd:
+        name: postgresql
+        state: stopped
+        enabled: false
+
+    # ── screen ────────────────────────────────────────────────────────────────
+
+    - name: Install screen
+      apt:
+        name: screen
+        state: present
+
+    - name: Write ~/.screenrc for {{ runner_user }}
+      become_user: "{{ runner_user }}"
+      blockinfile:
+        path: "{{ runner_home }}/.screenrc"
+        create: true
+        owner: "{{ runner_user }}"
+        mode: '0644'
+        marker: "# {mark} ANSIBLE MANAGED — screenrc"
+        block: |
+          defscrollback 100000        # Buffer size for scrollback history
+          scrollback 100000           # Increase scrollback buffer size per window
+          termcapinfo xterm* ti@:te@  # Mouse scroll
+          bindkey -m ^[[5~ stuff ^b   # PgUp in copy mode
+          bindkey -m ^[[6~ stuff ^f   # PgDn in copy mode
+
+    # ── Shell limits ───────────────────────────────────────────────────────────
+
+    - name: Raise open-file limit in ~/.bashrc
+      become_user: "{{ runner_user }}"
+      lineinfile:
+        path: "{{ runner_home }}/.bashrc"
+        line: "ulimit -n 65536"
+        create: true
+
+    # ── pg_benchmark repo ──────────────────────────────────────────────────────
+
+    - name: Clone pg_benchmark repository
+      become_user: "{{ runner_user }}"
+      git:
+        repo: "{{ pg_benchmark_repo }}"
+        dest: "{{ pg_benchmark_dest }}"
+        version: "{{ pg_benchmark_branch }}"
+        update: false   # don't pull if the directory already exists
+      tags:
+        - pg_benchmark
+
+    - name: Update pg_benchmark repository
+      become_user: "{{ runner_user }}"
+      git:
+        repo: "{{ pg_benchmark_repo }}"
+        dest: "{{ pg_benchmark_dest }}"
+        version: "{{ pg_benchmark_branch }}"
+        update: true
+      when: update_pg_benchmark | bool
+      tags:
+        - pg_benchmark_update
+
+    - name: Copy myenv.sh to runners
+      copy:
+        src: "{{ myenv_local_path }}"
+        dest: "{{ myenv_remote_path }}"
+        owner: "{{ runner_user }}"
+        group: "{{ runner_user }}"
+        mode: '0644'
+      when: update_myenv | bool
+      tags:
+        - myenv
+
+    # ── HammerDB tarball (optional) ────────────────────────────────────────────
+    # Enable by setting install_hammerdb: true in vars.yml or with -e install_hammerdb=true
+    # Run only HammerDB tasks with: --tags hammerdb
+
+    - name: Replace HammerDB directory when install is enabled
+      file:
+        path: "{{ hammerdb_dest }}/{{ hammerdb_dir_name }}"
+        state: absent
+      when: install_hammerdb | bool
+      tags:
+        - hammerdb
+
+    - name: Copy and extract HammerDB tarball
+      unarchive:
+        src: "{{ local_hammerdb_tarball }}"   # local path on control machine — Ansible scps it
+        dest: "{{ hammerdb_dest }}"
+        owner: "{{ runner_user }}"
+        group: "{{ runner_user }}"
+        mode: '0755'
+        # remote_src is NOT set — Ansible copies then extracts in one step
+      when: install_hammerdb | bool
+      tags:
+        - hammerdb
+
+    - name: Fix ownership on HammerDB directory
+      file:
+        path: "{{ hammerdb_dest }}/{{ hammerdb_dir_name }}"
+        owner: "{{ runner_user }}"
+        group: "{{ runner_user }}"
+        recurse: true
+      when: install_hammerdb | bool
+      tags:
+        - hammerdb
