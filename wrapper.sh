@@ -108,9 +108,14 @@ sanity_check()
 {
     local errors=0
 
-    # PG_NUM_VU (schema build VUs) must be less than warehouse count
-    if [[ "$PG_NUM_VU" -gt "$PG_COUNT_WARE" ]]; then
+    # PG_NUM_VU (schema build VUs) must be less than warehouse count when
+    # warehouses are being built. PG_COUNT_WARE=0 is the multi-runner sentinel
+    # for prepare-only DDL phases, where single-threaded behavior is expected.
+    if [[ "$PG_COUNT_WARE" -gt 0 && "$PG_NUM_VU" -gt "$PG_COUNT_WARE" ]]; then
         echo "SANITY CHECK FAILED: PG_NUM_VU ($PG_NUM_VU) must be less than PG_COUNT_WARE ($PG_COUNT_WARE)" >&2
+        errors=$((errors + 1))
+    elif [[ "$PG_COUNT_WARE" -eq 0 && -z "$PREPARE_ONLY" ]]; then
+        echo "SANITY CHECK FAILED: PG_COUNT_WARE is 0 outside prepare-only mode" >&2
         errors=$((errors + 1))
     fi
 

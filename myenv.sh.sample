@@ -13,8 +13,8 @@ export PGDATABASE=postgres
 export PG_DBASE=$PGDATABASE
 export PG_DEFAULTDBASE=$PGDATABASE
 
-export PG_COUNT_WARE=100
-export PG_FIRST_WARE=101
+export PG_COUNT_WARE=2000
+export PG_FIRST_WARE=1
 export PG_NUM_VU=50
 export PG_VU=10
 
