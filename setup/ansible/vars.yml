@@ -15,10 +15,10 @@ pg_benchmark_dest: "{{ runner_home }}/pg_benchmark"
 pg_benchmark_branch: "main"
 
 # Set true to run a git pull/update on the remote pg_benchmark checkout.
-update_pg_benchmark: false
+update_pg_benchmark: true
 
 # Set true to copy local myenv.sh to each runner.
-update_myenv: false
+update_myenv: true
 myenv_local_path: "{{ playbook_dir }}/../../myenv.sh"
 myenv_remote_path: "{{ pg_benchmark_dest }}/myenv.sh"
 
@@ -26,7 +26,7 @@ myenv_remote_path: "{{ pg_benchmark_dest }}/myenv.sh"
 # Set install_hammerdb: true and point local_hammerdb_tarball at the built
 # tarball to have Ansible scp + extract it on every runner.
 # Leave install_hammerdb: false to skip.
-install_hammerdb: false
+install_hammerdb: true
 local_hammerdb_tarball: "/home/virus/sources/HammerDB/Build/BawtBuild/Linux/x64/Release/Distribution/HammerDB-5.0-Prod-Linux.tar.gz"
 hammerdb_dest: "{{ runner_home }}"
 hammerdb_dir_name: "HammerDB-5.0"
