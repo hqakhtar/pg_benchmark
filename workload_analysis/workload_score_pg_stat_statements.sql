@@ -8,11 +8,28 @@
 --   1) Per-query fingerprint scoring table
 --   2) Aggregate percentages weighted by calls, execution time, and buffer/temp I/O
 --   3) A planning-bound vs execution-bound summary useful for Citus analysis
+--   4) A wait-event category summary (only when pgms_wait_sampling is reachable)
 --
 -- Requirements
 --   * pg_stat_statements must be installed.
 --   * Prefer PostgreSQL / pg_stat_statements versions exposing planning columns
 --     (total_plan_time / mean_plan_time). If not available, the script falls back.
+--
+-- Optional: pgms_wait_sampling (Azure Database for PostgreSQL Flexible Server)
+--   * When the Query Store wait-sampling view query_store.pgms_wait_sampling_view
+--     is reachable in the current database, its per-query wait events are folded
+--     in as additional signals (IO waits -> OLAP, Lock/LWLock waits -> OLTP
+--     contention, IPC waits -> distributed/HTAP).
+--   * The wait view is matched to pg_stat_statements on queryid and filtered to
+--     the current database OID.
+--   * NOTE: On Azure Flexible Server the wait-sampling data lives in the
+--     azure_sys database (schema query_store). Because PostgreSQL cannot join
+--     across databases, the wait signals only contribute when the view is
+--     visible from the database this script runs in. When it is not reachable,
+--     the script degrades gracefully: all wait signals are zero and a NOTICE is
+--     raised. The pg_stat_statements scoring is unaffected.
+--   * pg_stat_kcache and auto_explain are intentionally not used. auto_explain
+--     only writes plans to the server log and exposes no SQL-queryable view.
 --
 -- Notes
 --   * TIME_SERIES is treated as an orthogonal pattern; percentages are normalized
@@ -36,6 +53,70 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'pg_stat_statements is not installed in database %', current_database();
     END IF;
+END
+$plpgsql$;
+
+-- Optional pgms_wait_sampling integration.
+-- Build a per-query wait-event rollup keyed by queryid. The table is always
+-- created so downstream LEFT JOINs work; it stays empty (all-zero signals) when
+-- the Query Store wait-sampling view is not reachable in this database.
+DROP TABLE IF EXISTS _pss_wait_by_query;
+CREATE TEMP TABLE _pss_wait_by_query (
+    queryid             bigint,
+    wait_samples        numeric,
+    io_wait_samples     numeric,
+    lock_wait_samples   numeric,
+    ipc_wait_samples    numeric,
+    client_wait_samples numeric,
+    io_wait_fraction    numeric,
+    lock_wait_fraction  numeric,
+    ipc_wait_fraction   numeric
+);
+
+DO $plpgsql$
+DECLARE
+    v_relid oid := to_regclass('query_store.pgms_wait_sampling_view');
+BEGIN
+    IF v_relid IS NULL THEN
+        RAISE NOTICE 'pgms_wait_sampling not reachable in database % (query_store.pgms_wait_sampling_view absent); wait signals disabled. On Azure Flexible Server this view lives in the azure_sys database.', current_database();
+        RETURN;
+    END IF;
+
+    INSERT INTO _pss_wait_by_query
+    WITH w AS (
+        SELECT
+            query_id::bigint                                                       AS queryid,
+            event_type::text                                                       AS event_type,
+            calls::numeric                                                         AS samples
+        FROM query_store.pgms_wait_sampling_view
+        WHERE db_id = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND query_id IS NOT NULL
+    ),
+    agg AS (
+        SELECT
+            queryid,
+            sum(samples)                                                                       AS wait_samples,
+            sum(samples) FILTER (WHERE event_type = 'IO')                                      AS io_wait_samples,
+            sum(samples) FILTER (WHERE event_type IN ('Lock', 'LWLock', 'BufferPin'))          AS lock_wait_samples,
+            sum(samples) FILTER (WHERE event_type = 'IPC')                                     AS ipc_wait_samples,
+            sum(samples) FILTER (WHERE event_type IN ('Client', 'Activity'))                   AS client_wait_samples
+        FROM w
+        GROUP BY queryid
+    )
+    SELECT
+        queryid,
+        COALESCE(wait_samples, 0),
+        COALESCE(io_wait_samples, 0),
+        COALESCE(lock_wait_samples, 0),
+        COALESCE(ipc_wait_samples, 0),
+        COALESCE(client_wait_samples, 0),
+        COALESCE(io_wait_samples, 0)   / NULLIF(wait_samples, 0),
+        COALESCE(lock_wait_samples, 0) / NULLIF(wait_samples, 0),
+        COALESCE(ipc_wait_samples, 0)  / NULLIF(wait_samples, 0)
+    FROM agg;
+
+    RAISE NOTICE 'pgms_wait_sampling integrated: % queries with wait samples in database %.',
+        (SELECT count(*) FROM _pss_wait_by_query), current_database();
 END
 $plpgsql$;
 
@@ -78,8 +159,14 @@ WITH base AS (
             ) THEN s.mean_plan_time::numeric
             ELSE 0::numeric
         END                                                                                AS mean_plan_ms,
-        s.query
+        s.query,
+        COALESCE(wq.wait_samples, 0)                                                       AS wait_samples,
+        COALESCE(wq.io_wait_fraction, 0)                                                   AS io_wait_fraction,
+        COALESCE(wq.lock_wait_fraction, 0)                                                 AS lock_wait_fraction,
+        COALESCE(wq.ipc_wait_fraction, 0)                                                  AS ipc_wait_fraction
     FROM pg_stat_statements AS s
+    LEFT JOIN _pss_wait_by_query AS wq
+           ON wq.queryid = s.queryid
     WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
 ),
 features AS (
@@ -123,6 +210,7 @@ scored AS (
           + 0.8 * CASE WHEN calls >= 100 THEN 1 ELSE 0 END
           + 0.8 * CASE WHEN plan_fraction > 0.15 THEN 1 ELSE 0 END
           + 0.4 * CASE WHEN has_limit = 1 THEN 1 ELSE 0 END
+          + 0.6 * CASE WHEN lock_wait_fraction > 0.30 THEN 1 ELSE 0 END
         )::numeric(20,6)                                                                     AS oltp_raw,
 
         (
@@ -134,6 +222,7 @@ scored AS (
           + 0.8 * CASE WHEN shared_blks_per_call > 1000 THEN 1 ELSE 0 END
           + 0.8 * CASE WHEN plan_fraction < 0.05 THEN 1 ELSE 0 END
           + 0.4 * CASE WHEN is_select = 1 THEN 1 ELSE 0 END
+          + 0.6 * CASE WHEN io_wait_fraction > 0.30 THEN 1 ELSE 0 END
         )::numeric(20,6)                                                                     AS olap_raw,
 
         (
@@ -161,6 +250,7 @@ scored AS (
           + 0.8 * CASE WHEN plan_fraction BETWEEN 0.05 AND 0.30 THEN 1 ELSE 0 END
           + 0.8 * CASE WHEN calls >= 10 AND mean_exec_ms >= 5 THEN 1 ELSE 0 END
           + 0.6 * CASE WHEN has_join = 1 OR has_group_by = 1 OR (is_insert + is_update + is_delete) > 0 THEN 1 ELSE 0 END
+          + 0.5 * CASE WHEN ipc_wait_fraction > 0.20 THEN 1 ELSE 0 END
         )::numeric(20,6)                                                                     AS htap_raw
     FROM features
 ),
@@ -189,6 +279,10 @@ SELECT
     round(shared_blks_per_call, 2)                AS shared_blks_per_call,
     round(temp_blks_per_call, 2)                  AS temp_blks_per_call,
     round(temp_io_fraction, 4)                    AS temp_io_fraction,
+    round(wait_samples, 0)                        AS wait_samples,
+    round(io_wait_fraction, 4)                    AS io_wait_fraction,
+    round(lock_wait_fraction, 4)                  AS lock_wait_fraction,
+    round(ipc_wait_fraction, 4)                   AS ipc_wait_fraction,
     round(oltp_raw, 2)                            AS oltp_raw,
     round(olap_raw, 2)                            AS olap_raw,
     round(htap_raw, 2)                            AS htap_raw,
@@ -257,6 +351,16 @@ SELECT
         WHERE mean_exec_ms > 200
           AND (has_group_by = 1 OR has_window = 1 OR has_distinct = 1 OR has_having = 1)
     ) / NULLIF(sum(total_exec_ms), 0) * 100, 2) AS olap_like_exec_heavy_exec_pct
+FROM _pss_workload_features;
+
+-- Result set 4: pgms_wait_sampling wait-event category summary.
+-- All zeros / no rows when the wait-sampling view was not reachable.
+SELECT
+    coalesce(sum(wait_samples), 0)                                                          AS total_wait_samples,
+    count(*) FILTER (WHERE wait_samples > 0)                                                AS queries_with_waits,
+    round(sum(io_wait_fraction   * wait_samples) / NULLIF(sum(wait_samples), 0) * 100, 2)   AS io_wait_pct,
+    round(sum(lock_wait_fraction * wait_samples) / NULLIF(sum(wait_samples), 0) * 100, 2)   AS lock_wait_pct,
+    round(sum(ipc_wait_fraction  * wait_samples) / NULLIF(sum(wait_samples), 0) * 100, 2)   AS ipc_wait_pct
 FROM _pss_workload_features;
 
 COMMIT;
