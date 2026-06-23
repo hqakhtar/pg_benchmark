@@ -60,7 +60,9 @@ $plpgsql$;
 -- Build a per-query wait-event rollup keyed by queryid. The table is always
 -- created so downstream LEFT JOINs work; it stays empty (all-zero signals) when
 -- the Query Store wait-sampling view is not reachable in this database.
+SET LOCAL client_min_messages = warning;
 DROP TABLE IF EXISTS _pss_wait_by_query;
+SET LOCAL client_min_messages = notice;
 CREATE TEMP TABLE _pss_wait_by_query (
     queryid             bigint,
     wait_samples        numeric,
@@ -120,7 +122,9 @@ BEGIN
 END
 $plpgsql$;
 
+SET LOCAL client_min_messages = warning;
 DROP TABLE IF EXISTS _pss_workload_features;
+SET LOCAL client_min_messages = notice;
 CREATE TEMP TABLE _pss_workload_features AS
 WITH base AS (
     SELECT
