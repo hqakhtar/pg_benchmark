@@ -10,11 +10,13 @@ runner_user: "{{ ansible_user }}"
 runner_home: "/home/{{ runner_user }}"
 
 # ── pg_benchmark repo ────────────────────────────────────────────────────────
-pg_benchmark_repo: "https://github.com/hqakhtar/pg_benchmark.git"
+# Upload the pg_benchmark checkout from this control machine instead of cloning
+# from GitHub. pg_benchmark_local_path points at the local repo root.
+pg_benchmark_local_path: "{{ playbook_dir }}/../.."
 pg_benchmark_dest: "{{ runner_home }}/pg_benchmark"
-pg_benchmark_branch: "main"
 
-# Set true to run a git pull/update on the remote pg_benchmark checkout.
+# Set true to mirror deletions (rsync --delete) so the remote matches the local
+# folder exactly. Set false to only add/update files without removing extras.
 update_pg_benchmark: true
 
 # Set true to copy local myenv.sh to each runner.
@@ -27,6 +29,9 @@ myenv_remote_path: "{{ pg_benchmark_dest }}/myenv.sh"
 # tarball to have Ansible scp + extract it on every runner.
 # Leave install_hammerdb: false to skip.
 install_hammerdb: true
-local_hammerdb_tarball: "/home/virus/sources/HammerDB/Build/BawtBuild/Linux/x64/Release/Distribution/HammerDB-5.0-Prod-Linux.tar.gz"
+# HammerDB version drives both the tarball name and the extracted directory name,
+# so they can never drift out of sync.
+hammerdb_version: "5.0"
+hammerdb_dir_name: "HammerDB-{{ hammerdb_version }}"
+local_hammerdb_tarball: "/home/virus/sources/HammerDB/Build/BawtBuild/Linux/x64/Release/Distribution/{{ hammerdb_dir_name }}-Prod-Linux.tar.gz"
 hammerdb_dest: "{{ runner_home }}"
-hammerdb_dir_name: "HammerDB-5.0"

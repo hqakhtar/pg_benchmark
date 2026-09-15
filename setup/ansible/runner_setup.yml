@@ -118,25 +118,30 @@
 
     # ── pg_benchmark repo ──────────────────────────────────────────────────────
 
-    - name: Clone pg_benchmark repository
+    - name: Ensure pg_benchmark destination directory exists
       become_user: "{{ runner_user }}"
-      git:
-        repo: "{{ pg_benchmark_repo }}"
-        dest: "{{ pg_benchmark_dest }}"
-        version: "{{ pg_benchmark_branch }}"
-        update: false   # don't pull if the directory already exists
+      file:
+        path: "{{ pg_benchmark_dest }}"
+        state: directory
+        owner: "{{ runner_user }}"
+        group: "{{ runner_user }}"
+        mode: '0755'
       tags:
         - pg_benchmark
+        - pg_benchmark_update
 
-    - name: Update pg_benchmark repository
+    - name: Upload pg_benchmark from local folder
       become_user: "{{ runner_user }}"
-      git:
-        repo: "{{ pg_benchmark_repo }}"
-        dest: "{{ pg_benchmark_dest }}"
-        version: "{{ pg_benchmark_branch }}"
-        update: true
-      when: update_pg_benchmark | bool
+      synchronize:
+        src: "{{ pg_benchmark_local_path }}/"
+        dest: "{{ pg_benchmark_dest }}/"
+        delete: "{{ update_pg_benchmark | bool }}"
+        recursive: true
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=logs"
       tags:
+        - pg_benchmark
         - pg_benchmark_update
 
     - name: Copy myenv.sh to runners
