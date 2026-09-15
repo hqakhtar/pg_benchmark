@@ -1,0 +1,18 @@
+# Local connection and host configuration
+/myenv*
+!/myenv.sh.sample
+/hosts.txt*
+!/hosts.txt.sample
+/setup/ansible/inventory.local.ini
+/setup/ansible/vars.local.yml
+
+# Benchmark output
+/logs/
+/benchmark-results/
+*.log
+*.timing
+
+# Local backup and patch files
+*.orig
+*.patch
+*~

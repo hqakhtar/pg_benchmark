@@ -1,23 +1,24 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-export PGHOST=hamid-citus-hammerdb-c4-n8.postgres.database.azure.com
-export PGPORT=5432
-export PGPASSWORD=Admin1234
-export CITUS_LB_PORT=7432
+# Copy this file to myenv.sh and adjust it for the target database.
+# Prefer a ~/.pgpass file to storing a password here.
 
-export PGUSER=demouser
-export PG_SUPERUSER=$PGUSER
-export PG_USER=$PGUSER
+export PGHOST="${PGHOST:-localhost}"
+export PGPORT="${PGPORT:-5432}"
 
-export PGDATABASE=postgres
-export PG_DBASE=$PGDATABASE
-export PG_DEFAULTDBASE=$PGDATABASE
+export PGUSER="${PGUSER:-postgres}"
+export PG_SUPERUSER="${PG_SUPERUSER:-$PGUSER}"
+export PG_USER="${PG_USER:-$PGUSER}"
 
-export PG_COUNT_WARE=100
-export PG_FIRST_WARE=1
-export PG_NUM_VU=25
-export PG_VU=10
+export PGDATABASE="${PGDATABASE:-postgres}"
+export PG_DBASE="${PG_DBASE:-$PGDATABASE}"
+export PG_DEFAULTDBASE="${PG_DEFAULTDBASE:-$PGDATABASE}"
 
-export PG_DURATION=1
-export PG_RAMPUP=1
+export PG_COUNT_WARE="${PG_COUNT_WARE:-20}"
+export PG_FIRST_WARE="${PG_FIRST_WARE:-1}"
+export PG_NUM_VU="${PG_NUM_VU:-4}"
+export PG_VU="${PG_VU:-4}"
+
+export PG_DURATION="${PG_DURATION:-5}"
+export PG_RAMPUP="${PG_RAMPUP:-2}"
 

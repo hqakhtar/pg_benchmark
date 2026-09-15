@@ -20,6 +20,37 @@ distributed data loads driven from many runner VMs.
 - A read-only workload classifier (OLTP / OLAP / HTAP / TIME_SERIES) built on
   `pg_stat_statements`.
 
+## Quick start
+
+This path creates an isolated PostgreSQL data directory, runs one TPCC
+iteration, and removes the data directory afterward. Make sure the `PGPORT` in
+`myenv.sh` is not already in use.
+
+```bash
+cp myenv.sh.sample myenv.sh
+${EDITOR:-vi} myenv.sh
+
+PG_CONFIG_PATH="$(command -v pg_config)"
+HAMMERDB_HOME="/opt/HammerDB-5.0"  # directory containing hammerdbcli
+
+./wrapper.sh --check \
+  -C "$PG_CONFIG_PATH" \
+  -H "$HAMMERDB_HOME" \
+  -t ./benchmark-results \
+  -E ./myenv.sh
+
+./wrapper.sh -I -S -Z -i 1 \
+  -C "$PG_CONFIG_PATH" \
+  -H "$HAMMERDB_HOME" \
+  -t ./benchmark-results \
+  -E ./myenv.sh
+```
+
+`--check` validates paths, configuration, resource limits, and effective TPCC
+settings without initializing PostgreSQL or running HammerDB. The sample uses
+small localhost defaults; increase its warehouse, build-user, run-user, ramp,
+and duration values for a real benchmark.
+
 ## Repository layout
 
 | Path | Description |
@@ -35,30 +66,36 @@ distributed data loads driven from many runner VMs.
 
 ## Prerequisites
 
-- A PostgreSQL installation (use `pg_config` from that installation).
+- Bash 4 or newer.
+- A PostgreSQL installation; use `pg_config` from the exact version under
+  test.
 - Any extension you want to benchmark already installed (e.g.
   `pg_stat_statements`, `pg_stat_monitor`).
-- A HammerDB installation.
+- A HammerDB installation whose root contains an executable `hammerdbcli`.
 
-To build HammerDB from source and install it on Ubuntu runners, see
-[setup/build_hammerdb.sh](setup/build_hammerdb.sh),
-[setup/setup_hammerdb.sh](setup/setup_hammerdb.sh), and
-[setup/setup_runner_ubuntu.sh](setup/setup_runner_ubuntu.sh).
+To build HammerDB from source, run
+[setup/build_hammerdb.sh](setup/build_hammerdb.sh) from the HammerDB source
+directory. Runner provisioning is covered below.
 
 ## Configuration
 
-`wrapper.sh` sources two configuration files:
+`wrapper.sh` combines three configuration layers:
 
-- [pg.env](pg.env) — PostgreSQL server settings passed to `initdb`/startup via
-  `PG_INITDB_OPTS` (e.g. `shared_buffers`, `max_wal_size`).
-- [hammerdb/hammerdb.env](hammerdb/hammerdb.env) — connection details and TPCC
-  parameters such as `PG_COUNT_WARE` (warehouses), `PG_NUM_VU` (build virtual
-  users), `PG_VU` (run virtual users), `PG_DURATION`, and `PG_RAMPUP`.
+1. The optional file passed with `-E`, normally `myenv.sh`, supplies local
+   connection and TPCC values.
+2. [hammerdb/hammerdb.env](hammerdb/hammerdb.env) fills in any unset benchmark
+   values with portable defaults.
+3. [pg.env](pg.env), or the file passed with `-e`, supplies PostgreSQL server
+   settings used when `-I` starts a temporary cluster.
 
-For multi-VM runs and to keep environment-specific values out of version
-control, copy [myenv.sh.sample](myenv.sh.sample) to `myenv.sh` and adjust the
-connection and sizing variables (`PGHOST`, `PGPORT`, `PGUSER`, `PG_COUNT_WARE`,
-etc.).
+Copy [myenv.sh.sample](myenv.sh.sample) to the ignored `myenv.sh` file and edit
+that local copy. Pass it with `-E ./myenv.sh`; it is not loaded implicitly.
+Prefer `~/.pgpass` over storing `PGPASSWORD` in the file.
+
+The most commonly changed values are `PGHOST`, `PGPORT`, `PGUSER`, `PG_DBASE`,
+`PG_COUNT_WARE` (warehouses), `PG_NUM_VU` (schema-build virtual users), `PG_VU`
+(benchmark virtual users), `PG_DURATION`, and `PG_RAMPUP`. `PG_NUM_VU` cannot
+exceed `PG_COUNT_WARE`.
 
 ## Running on a single host
 
@@ -66,41 +103,48 @@ etc.).
 
 - `-C` path to `pg_config`
 - `-H` path to the HammerDB installation directory
-- `-t` a working folder where the script creates the data directory and logs
+- `-t` a working folder where the script creates the data directory and logs;
+  the folder is created if needed
 
-By default the script runs against an **existing** PostgreSQL cluster. To set
-up a fresh cluster, add `-I` (run `initdb`), `-S` (build schema), and `-Z`
-(remove the data directory).
+By default the script targets an **existing** PostgreSQL cluster. Use only a
+dedicated benchmark database: cleanup can drop TPCC/TPCH tables and other
+matching objects from the `public` schema. To use a temporary local cluster
+instead, add `-I` (run `initdb`), `-S` (build schema), and `-Z` (remove the data
+directory), as shown in Quick start.
 
-Example — benchmark an existing cluster:
+Example - benchmark an already prepared, dedicated cluster:
 
 ```bash
 ./wrapper.sh \
   -C /home/vagrant/postgres.14/inst/bin/pg_config \
   -H /home/vagrant/HammerDB-4.4 \
-  -t /tmp/xyz
+  -t /tmp/xyz \
+  -E ./myenv.sh
 ```
 
-Example — create a fresh cluster, build the schema, and benchmark:
+Example - create a fresh cluster, build the schema, and benchmark:
 
 ```bash
 ./wrapper.sh -I -S -Z \
   -C /home/vagrant/postgres.14/inst/bin/pg_config \
   -H /home/vagrant/HammerDB-4.4 \
-  -t /tmp/xyz
+  -t /tmp/xyz \
+  -E ./myenv.sh
 ```
 
 ### Options
 
 | Option | Variable | Description |
 |--------|----------|-------------|
-| `-h` | | Show usage. |
+| `-h`, `--help` | | Show usage. |
+| `--check` | | Validate configuration and exit without benchmarking. |
 | `-C` | `PG_CONFIG` | Path to `pg_config`. **Required.** |
 | `-H` | | HammerDB installation directory. **Required.** |
 | `-t` | | Working folder for the data directory and logs. **Required.** |
 | `-b` | `BENCHMARK_TYPE` | Benchmark type (default: `hammerdb`). |
 | `-c` | | Enable Citus compatibility mode. |
 | `-e` | `PG_CONF_FILE` | PostgreSQL configuration file (default: [pg.env](pg.env)). |
+| `-E` | `ENV_FILE` | Connection and TPCC environment file. |
 | `-I` | | Run `initdb`. |
 | `-i` | `ITERATIONS` | Number of iterations (default: 3). |
 | `-l` | `PRELOAD_LIBRARY` | Shared preload library. |
@@ -131,6 +175,9 @@ warehouse slices from a hosts file and performs:
 4. Phase 3 post-data DDL on the first runner.
 
 ```bash
+cp hosts.txt.sample hosts.txt
+${EDITOR:-vi} hosts.txt
+
 ./setup/run_tpcc_load_multivm.sh \
   ./hosts.txt \
   /opt/HammerDB/pg_benchmark \
@@ -148,20 +195,23 @@ list of optional variables (`ENABLE_CITUS`, `PHASE2_NUM_VU`, `SSH_OPTS`,
 
 ### Provisioning runners
 
-- [setup/setup_runner_ubuntu.sh](setup/setup_runner_ubuntu.sh) installs
-  PostgreSQL, tooling, and clones this repository on an Ubuntu host.
-- [setup/setup_multi_runners.sh](setup/setup_multi_runners.sh) runs a given
-  script across all hosts listed in a hosts file.
-- [setup/ansible/runner_setup.yml](setup/ansible/runner_setup.yml) provides a
-  declarative equivalent of the runner setup:
+The recommended path is the idempotent Ansible playbook. Its
+[setup guide](setup/ansible/README.md) covers prerequisites, private inventory,
+dry runs, local overrides, and optional HammerDB installation:
 
-  ```bash
-  cd setup/ansible
-  ansible-playbook -i inventory.ini runner_setup.yml
-  ```
+```bash
+cd setup/ansible
+cp inventory.ini inventory.local.ini
+${EDITOR:-vi} inventory.local.ini
+ansible-playbook -i inventory.local.ini runner_setup.yml --check
+ansible-playbook -i inventory.local.ini runner_setup.yml
+```
 
-List your runner hostnames in a `hosts.txt` file (see
-[hosts.txt.sample](hosts.txt.sample)).
+[setup/setup_runner_ubuntu.sh](setup/setup_runner_ubuntu.sh) is a standalone
+alternative for a dedicated Ubuntu runner. Set `POSTGRES_VERSION`,
+`REPOSITORY_URL`, or `REPOSITORY_DESTINATION` in its environment to override
+its defaults. [setup/setup_multi_runners.sh](setup/setup_multi_runners.sh) can
+send that script to every host in an ignored `hosts.txt` file.
 
 ## Output
 

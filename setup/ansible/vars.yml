@@ -19,19 +19,20 @@ pg_benchmark_dest: "{{ runner_home }}/pg_benchmark"
 # folder exactly. Set false to only add/update files without removing extras.
 update_pg_benchmark: true
 
-# Set true to copy local myenv.sh to each runner.
-update_myenv: true
+# Set true after creating myenv.sh from myenv.sh.sample in the repository root.
+update_myenv: false
 myenv_local_path: "{{ playbook_dir }}/../../myenv.sh"
 myenv_remote_path: "{{ pg_benchmark_dest }}/myenv.sh"
 
 # ── HammerDB tarball (optional) ───────────────────────────────────────────────
-# Set install_hammerdb: true and point local_hammerdb_tarball at the built
-# tarball to have Ansible scp + extract it on every runner.
+# Set install_hammerdb: true and place the built tarball at the path below to
+# have Ansible copy and extract it on every runner.
 # Leave install_hammerdb: false to skip.
-install_hammerdb: true
-# HammerDB version drives both the tarball name and the extracted directory name,
-# so they can never drift out of sync.
+install_hammerdb: false
+# HammerDB version drives both the tarball name and the extracted directory
+# name, so they can never drift out of sync.
 hammerdb_version: "5.0"
 hammerdb_dir_name: "HammerDB-{{ hammerdb_version }}"
-local_hammerdb_tarball: "/home/virus/sources/HammerDB/Build/BawtBuild/Linux/x64/Release/Distribution/{{ hammerdb_dir_name }}-Prod-Linux.tar.gz"
+hammerdb_archive_name: "{{ hammerdb_dir_name }}-Prod-Linux.tar.gz"
+local_hammerdb_tarball: "{{ playbook_dir }}/{{ hammerdb_archive_name }}"
 hammerdb_dest: "{{ runner_home }}"

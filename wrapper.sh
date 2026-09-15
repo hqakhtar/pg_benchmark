@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # SCRIPT: wrapper.sh
 #-----------------------------
@@ -13,7 +13,9 @@ set -o pipefail
 ## GLOBAL VARIABLES
 
 # Paths and file names
-export SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+export SCRIPT_DIR="$(
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd
+)"
 export WORK_DIR=""
 export HAMMERDB_INSTALL_DIR=""
 
@@ -24,6 +26,7 @@ export BENCHMARK_TYPE="hammerdb"
 export ITERATIONS="${ITERATIONS:-3}"
 export BENCHMARK_NAME="${BENCHMARK_NAME:-tpcc}"
 export PG_CONF_FILE="${PG_CONF_FILE:-$SCRIPT_DIR/pg.env}"
+export ENV_FILE="${ENV_FILE:-}"
 export BENCHMARK_SCRIPT="$BENCHMARK_TYPE/${BENCHMARK_SCRIPT:-$BENCHMARK_TYPE.sh}"
 export PG_VERSION=""
 
@@ -35,6 +38,7 @@ export BUILD_SCHEMA_ONCE=""
 export PREPARE_ONLY=""
 export REMOVE_DATA_DIR=""
 export CITUS_COMPAT_MODE=""
+export CHECK_ONLY=""
 
 
 ## USAGE
@@ -44,9 +48,11 @@ usage()
 
     cat << EOF
 
-usage: $0 OPTIONS
+usage: $0 [--check] OPTIONS
 
-This script runs benchmarking for all of following permutations:
+This script benchmarks PostgreSQL with an optional preload library.
+
+Supported configurations:
 - PG
 - Any preload shared library passed as an argument.
 
@@ -54,18 +60,19 @@ By default, this script runs against an EXISTING PostgreSQL cluster. To set up
 a new cluster, use the -I (initdb), -S (build schema), and -Z (remove data dir)
 options.
 
-It requires an environment file for sourcing PG and TPCC configuration
-variables. The default file $PG_CONF_FILE available in $SCRIPT_DIR. It also
+PostgreSQL settings are read from $PG_CONF_FILE. TPCC settings have portable
+defaults and can be overridden with -E or environment variables. It also
 expects that $BENCHMARK_SCRIPT resides in the "$SCRIPT_DIR/$BENCHMARK_TYPE"
 directory.
 
-Some fo the options can also be set via environment variables. The relevant
+Some options can also be set via environment variables. The relevant
 variable is provided with each option. However, some arguments are mandatory
 to prevent any accidental environment/data corruption.
 
 OPTIONS can be:
 
-  -h  Show this message
+    -h, --help            Show this message
+    --check               Validate configuration and exit without benchmarking
 
   -C  [PG_CONFIG]       pg_config path                   [REQUIRED]
   -H                    HammerDB installation dir        [REQUIRED]
@@ -73,9 +80,11 @@ OPTIONS can be:
                         * a folder where data directory and relevant log
                           files may be created.
 
-  -b  [BENCHMARK_Type]  Type of benchmark to run         [Default: $BENCHMARK_TYPE]
+    -b  [BENCHMARK_TYPE]  Type of benchmark to run
+                                                [Default: $BENCHMARK_TYPE]
   -c                    Enable Citus compatibility       [Default: not set]
   -e  [PG_CONF_FILE]    PG configuration file.           [Default: $PG_CONF_FILE]
+    -E  [ENV_FILE]        Connection and TPCC environment  [Default: none]
   -I                    Run initdb                       [Default: not set]
   -i  [ITERATIONS]      Number of iterations             [Default: $ITERATIONS]
   -l  [PRELOAD_LIBRARY] Shared preload library           [Default: none]
@@ -85,7 +94,7 @@ OPTIONS can be:
   -P                    Prepare only: build schema and   [Default: not set]
                         exit without running benchmarks.
   -r  [PG_INIT_SQL]     SQL script to run after initdb   [Default: none]
-  -S                    New schema every iternation      [Default: not set]
+    -S                    New schema every iteration       [Default: not set]
   -Z                    Remove data directory            [Default: not set]
 
 EOF
@@ -103,16 +112,63 @@ exit_script()
     exit ${1:-0}
 }
 
+usage_error()
+{
+    echo "ERROR: $*" >&2
+    echo "Run '$0 --help' for usage." >&2
+    exit_script 2
+}
+
+validate_integer_setting()
+{
+    local setting_name="$1"
+    local setting_value="$2"
+    local minimum_value="$3"
+
+    if [[ ! "$setting_value" =~ ^[0-9]+$ ]] ||
+        (( 10#$setting_value < minimum_value )); then
+        echo "SANITY CHECK FAILED: $setting_name must be an integer" \
+            ">= $minimum_value (got '$setting_value')" >&2
+        return 1
+    fi
+}
+
 # Sanity check environment before running benchmarks
 sanity_check()
 {
     local errors=0
 
-    # PG_NUM_VU (schema build VUs) must be less than warehouse count when
+    validate_integer_setting "ITERATIONS" "$ITERATIONS" 1 \
+        || errors=$((errors + 1))
+    validate_integer_setting "PGPORT" "$PGPORT" 1 || errors=$((errors + 1))
+    validate_integer_setting "PG_COUNT_WARE" "$PG_COUNT_WARE" 0 \
+        || errors=$((errors + 1))
+    validate_integer_setting "PG_FIRST_WARE" "$PG_FIRST_WARE" 1 \
+        || errors=$((errors + 1))
+    validate_integer_setting "PG_NUM_VU" "$PG_NUM_VU" 1 \
+        || errors=$((errors + 1))
+    validate_integer_setting "PG_VU" "$PG_VU" 1 || errors=$((errors + 1))
+    validate_integer_setting "PG_DURATION" "$PG_DURATION" 1 \
+        || errors=$((errors + 1))
+    validate_integer_setting "PG_RAMPUP" "$PG_RAMPUP" 0 \
+        || errors=$((errors + 1))
+
+    if [[ "$PGPORT" =~ ^[0-9]+$ ]] && (( 10#$PGPORT > 65535 )); then
+        echo "SANITY CHECK FAILED: PGPORT must be <= 65535 (got '$PGPORT')" >&2
+        errors=$((errors + 1))
+    fi
+
+    if [[ $errors -gt 0 ]]; then
+        echo "Sanity check failed with $errors error(s). Aborting." >&2
+        exit_script 1
+    fi
+
+    # PG_NUM_VU (schema build VUs) cannot exceed the warehouse count when
     # warehouses are being built. PG_COUNT_WARE=0 is the multi-runner sentinel
     # for prepare-only DDL phases, where single-threaded behavior is expected.
     if [[ "$PG_COUNT_WARE" -gt 0 && "$PG_NUM_VU" -gt "$PG_COUNT_WARE" ]]; then
-        echo "SANITY CHECK FAILED: PG_NUM_VU ($PG_NUM_VU) must be less than PG_COUNT_WARE ($PG_COUNT_WARE)" >&2
+        echo "SANITY CHECK FAILED: PG_NUM_VU ($PG_NUM_VU) cannot exceed" \
+            "PG_COUNT_WARE ($PG_COUNT_WARE)" >&2
         errors=$((errors + 1))
     elif [[ "$PG_COUNT_WARE" -eq 0 && -z "$PREPARE_ONLY" ]]; then
         echo "SANITY CHECK FAILED: PG_COUNT_WARE is 0 outside prepare-only mode" >&2
@@ -154,31 +210,39 @@ sanity_check()
     echo "Sanity check passed."
 }
 
-# Vaildate arguments to ensure that we can safely run the benchmark
+# Validate arguments to ensure that we can safely run the benchmark
 validate_args()
 {
     if [[ ! -f "$PG_CONF_FILE" ]];
 	then
-        echo "Configuration file does not exist. See usage for details" >&2
-        usage 1
+        usage_error "PostgreSQL configuration file not found: $PG_CONF_FILE"
     fi
 
-    if [[ ! -f "$PG_CONFIG" ]];
+    if [[ -n "$ENV_FILE" && ! -f "$ENV_FILE" ]];
     then
-        echo "pg_config pathname is required. See usage for details" >&2
-        usage 1
+        usage_error "Environment file not found: $ENV_FILE"
     fi
 
-    if [[ ! -d "$HAMMERDB_INSTALL_DIR" ]];
+    if [[ -z "$PG_CONFIG" || ! -x "$PG_CONFIG" ]];
     then
-        echo "Incorrect path for hammerdb installation. See usage for details" >&2
-        usage 1
+        usage_error "-C must point to an executable pg_config"
     fi
 
-    if [[ ! -d "$WORK_DIR" ]];
+    if [[ -z "$HAMMERDB_INSTALL_DIR" ||
+          ! -x "$HAMMERDB_INSTALL_DIR/hammerdbcli" ]];
     then
-        echo "Script working directory for the script is required. See usage for details" >&2
-        usage 1
+        usage_error "-H must point to a HammerDB directory containing" \
+            "executable hammerdbcli"
+    fi
+
+    if [[ -z "$WORK_DIR" ]];
+    then
+        usage_error "-t working directory is required"
+    fi
+
+    if ! mkdir -p "$WORK_DIR";
+    then
+        usage_error "Unable to create working directory: $WORK_DIR"
     fi
 }
 
@@ -368,7 +432,7 @@ run_loop()
 # Use pg_config and get PG version
 get_pg_version()
 {
-	PG_VERSION=$($PG_CONFIG --version | cut -d' ' -f2)
+    PG_VERSION=$("$PG_CONFIG" --version | cut -d' ' -f2)
 
     echo "PostgreSQL Version [$PG_VERSION]"
 }
@@ -388,13 +452,30 @@ run_benchmark()
 	run_loop "$benchmark_type"
 }
 
+# Normalize the two long options before parsing the existing short options.
+normalized_args=()
+for argument in "$@"; do
+    case "$argument" in
+        --check)
+            CHECK_ONLY="true"
+            ;;
+        --help)
+            normalized_args+=("-h")
+            ;;
+        *)
+            normalized_args+=("$argument")
+            ;;
+    esac
+done
+set -- "${normalized_args[@]}"
+
 # Check options passed in.
-while getopts "h b:cC:e:H:Ii:l:n:OPr:SZt:" OPTION
+while getopts "hb:cC:e:E:H:Ii:l:n:OPr:SZt:" OPTION
 do
     case $OPTION in
         h)
             usage
-            exit_script 1
+            exit_script 0
             ;;
 
         b)
@@ -411,6 +492,10 @@ do
 
         e)
             PG_CONF_FILE=$OPTARG
+            ;;
+
+        E)
+            ENV_FILE=$OPTARG
             ;;
 
         H)
@@ -459,8 +544,7 @@ do
             ;;
 
         ?)
-            usage
-            exit_script
+            usage 2
             ;;
     esac
 done
@@ -469,13 +553,34 @@ done
 validate_args
 
 # Source the environment file(s)
-source $PG_CONF_FILE
+BENCHMARK_ENV_FILE="$SCRIPT_DIR/$BENCHMARK_TYPE/${BENCHMARK_TYPE}.env"
+if [[ ! -f "$BENCHMARK_ENV_FILE" ]]; then
+    usage_error "Unsupported benchmark type or missing defaults:" \
+        "$BENCHMARK_TYPE"
+fi
+if [[ -n "$ENV_FILE" ]]; then
+    source "$ENV_FILE"
+fi
+source "$BENCHMARK_ENV_FILE"
+source "$PG_CONF_FILE"
 
 # Run sanity checks before proceeding
 sanity_check
 
 # Get the PG version
 get_pg_version
+
+if [[ -n "$CHECK_ONLY" ]]; then
+    echo
+    echo "Configuration check passed."
+    echo "  PostgreSQL: $PG_VERSION ($PG_CONFIG)"
+    echo "  HammerDB:   $HAMMERDB_INSTALL_DIR"
+    echo "  Target:     $PG_USER@$PGHOST:$PGPORT/$PG_DBASE"
+    echo "  Work dir:   $WORK_DIR"
+    echo "  TPCC:       $PG_COUNT_WARE warehouses," \
+        "$PG_NUM_VU build VUs, $PG_VU run VUs"
+    exit_script 0
+fi
 
 # If prepare-only mode, build schema and exit
 if [[ ! -z "$PREPARE_ONLY" ]]; then

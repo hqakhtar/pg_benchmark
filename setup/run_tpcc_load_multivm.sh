@@ -72,6 +72,21 @@ PHASE2_NUM_VU="${PHASE2_NUM_VU:-${PG_NUM_VU:-200}}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=accept-new}"
 LOG_DIR="${LOG_DIR:-./logs/load-$(date +%Y%m%d-%H%M%S)}"
 
+case "$ENABLE_CITUS" in
+  true)
+    CITUS_FLAG="-c"
+    CLEANUP_SQL="hammerdb/hammerdb_cleanup_citus.sql"
+    ;;
+  false)
+    CITUS_FLAG=""
+    CLEANUP_SQL="hammerdb/hammerdb_cleanup.sql"
+    ;;
+  *)
+    echo "ENABLE_CITUS must be 'true' or 'false'" >&2
+    exit 1
+    ;;
+esac
+
 mkdir -p "$LOG_DIR"
 
 if [[ ! -f "$HOSTS_FILE" ]]; then
@@ -229,7 +244,9 @@ export PG_NUM_VU='$num_vu'
 export PG_VU='$num_vu'
 MYENV_APPEND
     source ./myenv.sh
-    ./wrapper.sh -C '$PG_CONFIG_PATH' -H '$HAMMERDB_HOME' -t '$remote_work_dir' -c -P
+    ./wrapper.sh \
+      -C '$PG_CONFIG_PATH' -H '$HAMMERDB_HOME' \
+      -t '$remote_work_dir' $CITUS_FLAG -P
   " >"$log_file" 2>&1
 }
 
@@ -243,7 +260,7 @@ run_cleanup_on_first_runner() {
     export PGPASSWORD='$PGPASSWORD'
     psql -v ON_ERROR_STOP=1 \
       -h '$PGHOST' -p '$PGPORT' -U '$PG_USER' -d '$PG_DBASE' \
-      -f hammerdb/hammerdb_cleanup_citus.sql
+      -f '$CLEANUP_SQL'
   " >"$log_file" 2>&1
 }
 
