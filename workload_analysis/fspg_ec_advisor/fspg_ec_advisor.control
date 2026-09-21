@@ -1,0 +1,6 @@
+comment = 'FSPG Elastic Cluster workload and capacity advisor'
+default_version = '1.0'
+relocatable = false
+schema = fspg_ec_advisor
+requires = 'pg_stat_statements'
+superuser = false

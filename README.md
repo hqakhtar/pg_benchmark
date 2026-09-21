@@ -62,7 +62,7 @@ and duration values for a real benchmark.
 | [hammerdb/](hammerdb/) | HammerDB benchmark driver, env file, and cleanup/maintenance SQL. |
 | [helper_sqls/](helper_sqls/) | Utility SQL (e.g. Citus shard distribution helpers). |
 | [setup/](setup/) | Provisioning scripts, multi-VM orchestration, and Ansible playbook. |
-| [workload_analysis/](workload_analysis/) | Workload classifier SQL and its [README](workload_analysis/README.md). |
+| [workload_analysis/fspg_ec_advisor/](workload_analysis/fspg_ec_advisor/) | FSPG EC Advisor PostgreSQL extension and operator documentation. |
 
 ## Prerequisites
 
@@ -230,13 +230,8 @@ Vuser 1:TEST RESULT : System achieved 37331 NOPM from 86015 PostgreSQL TPM
 
 ## Workload analysis
 
-After a benchmark, you can classify the workload captured in
-`pg_stat_statements` (OLTP / OLAP / HTAP / TIME_SERIES) with the read-only
-profiler in [workload_analysis/](workload_analysis/):
-
-```bash
-psql -X -v ON_ERROR_STOP=1 -d <database> \
-  -f workload_analysis/workload_score_pg_stat_statements.sql
-```
-
-See [workload_analysis/README.md](workload_analysis/README.md) for details.
+After a benchmark, use the
+[FSPG EC Advisor extension](workload_analysis/fspg_ec_advisor/) to capture and
+classify `pg_stat_statements` workload evidence. Its
+[README](workload_analysis/fspg_ec_advisor/README.md) covers installation, API,
+automation, and tests.

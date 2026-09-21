@@ -1,0 +1,87 @@
+\set ECHO none
+INFO:  fspg_ec_advisor did not reset pg_stat_statements because fspg_ec_advisor.reset_stats is off
+HINT:  Set fspg_ec_advisor.reset_stats = on before calling fspg_ec_advisor.reset_stats().
+INFO:  fspg_ec_advisor did not reset pg_stat_statements because fspg_ec_advisor.reset_stats is off
+HINT:  Set fspg_ec_advisor.reset_stats = on before calling fspg_ec_advisor.reset_stats().
+INFO:  fspg_ec_advisor did not reset pg_stat_statements because fspg_ec_advisor.reset_stats is invalid
+HINT:  Set fspg_ec_advisor.reset_stats to on or off; invalid values are treated as off.
+INFO:  fspg_ec_advisor could not schedule an advisory cycle because pg_cron is unavailable
+HINT:  Install and preload pg_cron, or call fspg_ec_advisor.run_advisory_cycle() from an external scheduler.
+ scheduler_unavailable_returns_null 
+------------------------------------
+ t
+(1 row)
+
+INFO:  fspg_ec_advisor could not unschedule an advisory cycle because pg_cron is unavailable
+HINT:  Use the scheduler that owns the advisory-cycle invocation.
+ scheduler_unavailable_returns_false 
+-------------------------------------
+ t
+(1 row)
+
+ complete_azure_monitor_delivery 
+---------------------------------
+ t
+(1 row)
+
+ reset_safety_capture_created 
+------------------------------
+ t
+(1 row)
+
+                    assertion_name                    | passed 
+------------------------------------------------------+--------
+ azure_delivery_disabled_creates_event_without_outbox | t
+ azure_delivery_enabled_queues_outbox                 | t
+ cluster_fairness_is_null_without_citus               | t
+ complete_unclaimed_delivery_returns_false            | t
+ default_policy_is_enabled                            | t
+ disabled_policy_creates_no_event                     | t
+ disabled_policy_returns_disabled_state               | t
+ empty_schedule_rejected                              | t
+ empty_telemetry_source_rejected                      | t
+ event_acknowledgement_succeeds                       | t
+ event_suppression_succeeds                           | t
+ expired_or_requeued_delivery_is_reclaimed            | t
+ expired_suppression_reopens_and_queues_delivery      | t
+ extension_version_is_1_0                             | t
+ failed_delivery_is_pending_with_error                | t
+ failed_delivery_reaches_terminal_state_at_limit      | t
+ failed_delivery_requeues_before_limit                | t
+ fresh_telemetry_is_ingested                          | t
+ future_telemetry_rejected                            | t
+ invalid_capture_interval_rejected                    | t
+ invalid_capture_samples_rejected                     | t
+ invalid_capture_window_rejected                      | t
+ invalid_delivery_attempts_rejected                   | t
+ invalid_outbox_claim_rejected                        | t
+ invalid_policy_latency_rejected                      | t
+ invalid_policy_window_rejected                       | t
+ invalid_schedule_job_id_rejected                     | t
+ invalid_suppression_rejected                         | t
+ invalid_telemetry_value_rejected                     | t
+ latest_advice_is_null_before_capture                 | t
+ missing_pg_stat_statements_dependency_rejected       | t
+ new_delivery_is_claimed_after_terminal_failure       | t
+ optional_cross_node_metrics_are_empty_without_citus  | t
+ optional_wait_metrics_are_empty_without_view         | t
+ outbox_claims_enabled_delivery                       | t
+ reset_guc_explicit_off_returns_false                 | t
+ reset_guc_explicit_on_returns_true                   | t
+ reset_guc_invalid_returns_false                      | t
+ reset_guc_is_unset                                   | t
+ reset_guc_unset_returns_false                        | t
+ reset_safety_telemetry_is_ingested                   | t
+ resource_snapshot_has_connection_status              | t
+ stale_telemetry_does_not_create_new_action           | t
+ stale_telemetry_is_ingested                          | t
+ statistics_reset_blocks_automated_action             | t
+ successful_delivery_has_delivered_state              | t
+ successful_delivery_is_acknowledged                  | t
+ suppressed_event_does_not_queue_delivery             | t
+ terminal_delivery_is_failed                          | t
+ unknown_event_acknowledgement_returns_false          | t
+ unknown_policy_rejected                              | t
+(51 rows)
+
+fspg_ec_advisor_config_regression_complete

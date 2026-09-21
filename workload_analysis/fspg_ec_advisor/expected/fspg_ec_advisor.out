@@ -1,0 +1,109 @@
+\set ECHO none
+     extname     |  extnamespace   
+-----------------+-----------------
+ fspg_ec_advisor | fspg_ec_advisor
+(1 row)
+
+ fspg_ec_advisor_regression_probe 
+----------------------------------
+                                1
+(1 row)
+
+ query_scores_return_rows | query_scores_have_queryids | query_scores_have_execution_time 
+--------------------------+----------------------------+----------------------------------
+ t                        | t                          | t
+(1 row)
+
+ has_capture_key | has_workload | has_resource | has_window | has_recommendation | has_action | has_confidence 
+-----------------+--------------+--------------+------------+--------------------+------------+----------------
+ t               | t            | t            | t          | t                  | t          | t
+(1 row)
+
+ history_has_capture | history_has_action | history_has_payload 
+---------------------+--------------------+---------------------
+ t                   | t                  | t
+(1 row)
+
+ feedback_recorded 
+-------------------
+ t
+(1 row)
+
+ calibration_has_group | calibration_has_feedback | calibration_has_positive_outcome 
+-----------------------+--------------------------+----------------------------------
+ t                     | t                        | t
+(1 row)
+
+ infrastructure_telemetry_ingested 
+-----------------------------------
+ t
+(1 row)
+
+ cycle_has_automation | cycle_has_event | cycle_queues_outbox 
+----------------------+-----------------+---------------------
+ t                    | t               | t
+(1 row)
+
+ outbox_has_event | outbox_is_activation | outbox_claimed_once 
+------------------+----------------------+---------------------
+ t                | t                    | t
+(1 row)
+
+ azure_monitor_delivery_completed 
+----------------------------------
+ t
+(1 row)
+
+ advisory_event_acknowledged 
+-----------------------------
+ t
+(1 row)
+
+ advisory_event_suppressed 
+---------------------------
+ t
+(1 row)
+
+ stale_event_resolved 
+----------------------
+ t
+(1 row)
+
+ resolution_outbox_has_event | resolution_outbox_is_resolved 
+-----------------------------+-------------------------------
+ t                           | t
+(1 row)
+
+ azure_monitor_delivery_requeued 
+---------------------------------
+ t
+(1 row)
+
+ retry_outbox_has_event | retry_outbox_is_pending | retry_outbox_has_error 
+------------------------+-------------------------+------------------------
+ t                      | t                       | t
+(1 row)
+
+INFO:  fspg_ec_advisor did not reset pg_stat_statements because fspg_ec_advisor.reset_stats is off
+HINT:  Set fspg_ec_advisor.reset_stats = on before calling fspg_ec_advisor.reset_stats().
+ reset_when_disabled 
+---------------------
+ f
+(1 row)
+
+ capture_and_reset_returns_capture 
+-----------------------------------
+ t
+(1 row)
+
+  reset_blocker   
+------------------
+ STATISTICS_RESET
+(1 row)
+
+ latest_action_is_available 
+----------------------------
+ REVIEW_TELEMETRY
+(1 row)
+
+fspg_ec_advisor_regression_complete
