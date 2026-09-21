@@ -9,6 +9,7 @@
 # Benchmark output
 /logs/
 /benchmark-results/
+/workload_analysis/dashboard.old/
 *.log
 *.timing
 

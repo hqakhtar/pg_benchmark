@@ -185,6 +185,9 @@ Policies live in `fspg_ec_advisor.advisory_policy`. They control confidence,
 capture-window requirements, connection and rate thresholds, infrastructure
 thresholds, cooldowns, auto-resolution, and Azure Monitor delivery.
 
+See the [SQL decision guide](docs/sql-decision-guide.md) for the evidence,
+confidence, workload-fit, policy, and event-lifecycle path behind each action.
+
 Infrastructure monitoring is supplied externally rather than embedded with
 cloud credentials in PostgreSQL:
 
