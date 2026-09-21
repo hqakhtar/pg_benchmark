@@ -1,4 +1,24 @@
-# Workload Classifier — `workload_score_pg_stat_statements.sql`
+# FSPG EC Advisor
+
+**FSPG EC Advisor** is the PostgreSQL / Citus workload and capacity advisor in
+this directory. Its canonical delivery is the SQL-only PostgreSQL extension in
+[workload_analysis/fspg_ec_advisor](fspg_ec_advisor), installed as
+`fspg_ec_advisor`:
+
+```sql
+CREATE EXTENSION fspg_ec_advisor;
+SELECT fspg_ec_advisor.capture();
+```
+
+The extension replaces psql orchestration with a database-native capture API,
+durable advisor history, and feedback calibration. The existing
+`workload_score_pg_stat_statements.sql` file remains below as the **legacy psql
+compatibility runner** until the Phase 3 dashboard moves to a direct PostgreSQL
+connection.
+
+---
+
+## Legacy Runner
 
 A read-only profiler that inspects a PostgreSQL / Citus database and reports
 what *kind* of workload it is running: **OLTP**, **OLAP**, **HTAP**, and
@@ -7,10 +27,12 @@ what *kind* of workload it is running: **OLTP**, **OLAP**, **HTAP**, and
 `pgms_wait_sampling`), classifies every query fingerprint, and aggregates the
 results into workload-level percentages.
 
-The script makes **no permanent changes** to the database: everything runs
-inside a single transaction using temporary tables, and it ends with `COMMIT`
-after producing its result sets. Its only side effect is appending one summary
-row to the optional Grafana CSV file (see result set 9).
+The script keeps its per-run calculations in temporary tables and commits at the
+end. PostgreSQL requires temporary relations to live in `pg_temp`, so the script
+gives them generated `citus_<server>_<database>_<timestamp>_*` names. Phase 1
+also creates a small durable `citus_advisor` schema for capture baselines,
+operator feedback, and calibration; this state is required for reset-safe rate
+calculation and sustained-pressure decisions.
 
 ---
 
@@ -27,17 +49,25 @@ row to the optional Grafana CSV file (see result set 9).
    with a partition key) or cross-node (anything that fans out). The cross-node
    flag feeds the OLAP score. If Citus is absent it degrades gracefully (all
    queries treated as single-node) and a `NOTICE` is raised.
-4. **Builds a feature table** (`_pss_workload_features`) per query fingerprint:
+4. **Builds a generated temporary feature table** per query fingerprint:
    - `base` — clean raw counters from `pg_stat_statements`.
    - `features` — derived ratios and yes/no flags parsed from the query text.
    - `scored` — four weighted scores (OLTP / OLAP / TIME_SERIES / HTAP).
    - `weighted` — attaches importance weights (calls, exec time, I/O blocks).
 5. **Optionally measures Citus data distribution** — if `citus_shards` is
   present, it computes a per-table and cluster-wide shard-byte *fairness*
-  score.
+  score, including active workers that currently hold zero shards.
 6. **Scores query routability** — how local / single-node the workload is.
-7. **Emits up to nine result sets** (see below) and appends a one-row workload
-   summary to a CSV for Grafana.
+7. **Captures PostgreSQL 17 resource pressure** — connection utilization and
+  waiting sessions are evaluated at collection time; database, I/O, and
+  checkpoint counters are exported with their reset timestamps for trend and
+  rate calculation.
+8. **Builds a Phase 1 operator assessment** — compares reset-compatible
+  captures, requires sustained pressure before capacity candidates, and emits
+  confidence, telemetry gaps, evidence, expected benefit, and a verification
+  step.
+9. **Emits up to nine result sets** (see below) and appends a one-row workload
+  summary to a CSV for Grafana.
 
 ### Run it
 
@@ -58,6 +88,13 @@ psql -X -v ON_ERROR_STOP=1 -v verbose=off -d <database> \
 # Custom CSV path for the Grafana export (default: workload_score.csv)
 psql -X -v ON_ERROR_STOP=1 -v csv=/abs/path/workload_score.csv -d <database> \
   -f workload_analysis/workload_score_pg_stat_statements.sql
+
+# Tune Phase 1 capture requirements for the local collection cadence.
+psql -X -v ON_ERROR_STOP=1 \
+  -v advisor_pressure_samples=3 \
+  -v advisor_pressure_window_minutes=60 \
+  -v advisor_min_window_seconds=300 \
+  -d <database> -f workload_analysis/workload_score_pg_stat_statements.sql
 ```
 
 > Tip: For meaningful output, run it against a database that has handled a real
@@ -69,9 +106,10 @@ psql -X -v ON_ERROR_STOP=1 -v csv=/abs/path/workload_score.csv -d <database> \
 ## Output
 
 By default **all result sets (1–9)** are printed. Set `-v verbose=off` to emit
-only result set 9 (the consolidated summary). Result sets 5–8 are populated only
-on a Citus cluster; off Citus they are present but empty / zero. Result set 9 is
-always printed and always written to the Grafana CSV.
+only result set 9 (the consolidated summary). Result sets 5–6 require Citus;
+result sets 7–8 also work on plain PostgreSQL, where execution is local by
+definition. Result set 9 is always printed and always written to the Grafana
+CSV.
 
 1. **Per-fingerprint scores** (hidden with `verbose=off`)
 
@@ -84,7 +122,8 @@ always printed and always written to the Grafana CSV.
 3. **Planning- vs execution-bound** (hidden with `verbose=off`)
 
   How much of the workload is dominated by query *planning* versus
-  *execution*, which is relevant for Citus.
+  *execution*, which is relevant for Citus. Planning fields are populated only
+  when `pg_stat_statements.track_planning` is on.
 4. **Wait-event summary** (hidden with `verbose=off`)
 
   IO, Lock, and IPC wait percentages. These are zero unless
@@ -99,17 +138,19 @@ always printed and always written to the Grafana CSV.
   score.
 7. **Per-query routability** (hidden with `verbose=off`)
 
-  Whether each query is nested or cross-node, with the worst routability
+  Whether each top-level query is cross-node, with the worst routability
   scores first.
 8. **Routability summary** (hidden with `verbose=off`)
 
-  The share of execution time that is ideal-local, cross-node, or nested, and
-  the mean routability score.
+  The execution-time-weighted share that is ideal-local or cross-node, plus the
+  execution-time-weighted mean routability score.
 9. **Consolidated summary** (always shown)
 
   The headline workload mix, data-distribution fairness, routability,
-  dominant workload, and scale recommendation. It is also appended to the
-  Grafana CSV.
+  dominant workload, scale recommendation, and resource-pressure snapshot. It
+  also includes the Phase 1 `recommended_action`, confidence, reset-safe rate
+  evidence, telemetry blockers, expected benefit, and verification step. It is
+  appended to the Grafana CSV.
 
 ---
 
@@ -375,7 +416,8 @@ workload?" has three valid answers depending on what you care about.
 ### Planning vs execution thresholds (Result set 3)
 
 This summary matters for **Citus**, where distributed query *planning* can
-become a bottleneck independent of how much data is actually processed.
+become a bottleneck independent of how much data is actually processed. It is
+only evaluated while `pg_stat_statements.track_planning` is enabled.
 
 - **Planning-bound: `plan_fraction >= 0.30`**
 
@@ -423,7 +465,10 @@ fairness = clamp(0, 1 − stddev_pop(node_bytes) / mean(node_bytes))
 - **Toward `0`**: Bytes are concentrated on a few nodes, indicating skewed
   distribution.
 
-It is reported per distributed table and as a `(cluster overall)` row.
+It is reported per distributed table and as a `(cluster overall)` row. Active
+primary workers are included even when they hold zero shard bytes, so a newly
+added but empty worker cannot make an imbalanced cluster appear perfectly
+balanced.
 
 > *Note:* this measures **byte** skew, not **load** skew — a table can be evenly
 > sized yet still have a hot shard. Off Citus the result sets are empty and a
@@ -431,21 +476,17 @@ It is reported per distributed table and as a `(cluster overall)` row.
 
 ### Query routability / locality (Result sets 7 & 8)
 
-Every application statement gets a routability score in `(0, 1]` that starts at
-`1.00` and is penalized for traits that make a query harder to route in a
-distributed cluster:
+Every top-level application statement gets a routability score in `(0, 1]` that
+starts at `1.00` and is penalized when it runs cross-node:
 
-- **×0.5, has a parent** (not top-level, from `toplevel`)
-
-  Nested statements are harder to route or optimize independently.
 - **×0.5, runs cross-node** (from the Citus rollup)
 
   Scatter/gather across workers is costlier than a single-node route.
 
-Worst case (both) scores `0.25`. The summary reports the share of execution time
-that is ideal-local vs cross-node vs nested, plus the mean routability score.
-Unlike the main classifier this set keeps nested statements so the parent signal
-is visible.
+The lowest score is `0.50`. Nested statements are excluded so their execution
+time is not counted both in their parent and their own fingerprint. The summary
+reports execution-time-weighted ideal-local and cross-node shares plus the
+execution-time-weighted mean routability score.
 
 ### Consolidated summary & Grafana CSV (Result set 9)
 
@@ -455,6 +496,67 @@ It is always printed (even without `verbose`) and is appended as a timestamped
 row to a CSV (`workload_score.csv` by default, override with
 `-v csv=/abs/path.csv`) so a Grafana CSV/Infinity datasource can chart the
 workload over time.
+
+For a plain PostgreSQL server, a qualifying `SCALE_OUT` recommendation means
+moving the workload to Citus / Azure Elastic Clusters for horizontal scale-out;
+on Citus, it means adding worker capacity to the existing cluster.
+
+### Resource pressure snapshot (Result set 9)
+
+The final row exports these PostgreSQL 17 signals alongside the workload
+recommendation:
+
+- **Connection pressure**: client backend count, usable connection capacity,
+  active/waiting sessions, idle-in-transaction sessions, and a conservative
+  `resource_pressure_status`. This is the only immediate saturation signal.
+- **Current-database counters**: cache-hit ratio, block read/write timing, temp
+  bytes, and deadlocks from `pg_stat_database`.
+- **Server-wide counters**: client-backend reads/writes from `pg_stat_io`, plus
+  requested/timed checkpoints and checkpoint timing from `pg_stat_checkpointer`.
+
+I/O, temp, deadlock, and checkpoint values are cumulative since their associated
+`*_stats_reset` timestamp. Compare consecutive CSV captures and discard an
+interval crossing a reset before using them as rates. `track_io_timing` marks
+whether database I/O timing is available. PostgreSQL statistics do not expose
+host CPU, memory, storage queue depth, or cloud IOPS saturation, so this snapshot
+must complement rather than replace infrastructure monitoring.
+
+### Phase 1 Operator Assessment (Result set 9)
+
+The advisor saves each final capture in `citus_advisor.capture_history`, scoped
+by PostgreSQL server and database. A rate window is valid only when the previous
+capture has matching `pg_stat_statements`, database, I/O, and checkpointer reset
+timestamps and meets `advisor_min_window_seconds`.
+
+Capacity-oriented actions require `advisor_pressure_samples` pressure captures
+inside `advisor_pressure_window_minutes`; the defaults are three captures within
+60 minutes. Until that evidence exists, workload-fit outcomes are gated to
+`MONITOR` or `REVIEW_TELEMETRY` rather than capacity actions.
+
+The authoritative field is `recommended_action`; `workload_fit_recommendation`
+retains the prior workload-only result for comparison. Phase 1 action types are:
+
+- `REVIEW_TELEMETRY` and `MONITOR`
+- `TUNE_QUERY_OR_INDEX` and `ADD_CONNECTION_POOLING`
+- `SCALE_UP_CANDIDATE`
+- `CITUS_MIGRATION_CANDIDATE` and `ADD_CITUS_WORKERS_CANDIDATE`
+- `REBALANCE_FIRST` and `OPTIMIZE_LOCALITY_FIRST`
+
+Record an operator outcome after acting on a capture:
+
+```sql
+SELECT citus_advisor.record_feedback(
+  '<capture_key>',
+  'ADD_CONNECTION_POOLING',
+  'improved',
+  'Waiting sessions fell after pooling was enabled.'
+);
+
+SELECT * FROM citus_advisor.recommendation_calibration;
+```
+
+The calibration view groups observed outcomes by action and confidence. It is
+evidence for threshold tuning, not automatic threshold modification.
 
 > The CSV export uses `COPY ... TO PROGRAM`, which runs on the **server** and
 > needs superuser or the `pg_execute_server_program` role. On failure the export
@@ -467,8 +569,14 @@ workload over time.
 ## Notes & limitations
 
 - **`track_planning`**: plan-based signals (`plan_fraction`, planning-bound
-  metrics) are only meaningful when `pg_stat_statements.track_planning` is on.
-  If the planning columns are absent, the script falls back to `0`.
+  metrics) are only considered when `pg_stat_statements.track_planning` is on.
+  When it is off, planning fields remain null and do not affect scoring.
+- **Statistics visibility**: run as a role able to inspect all database
+  activity and statistics for complete resource-pressure data; otherwise session
+  counts and wait states can be incomplete.
+- **Advisor-state privileges**: the first run requires permission to create and
+  write the `citus_advisor` schema. Capture history intentionally persists; use
+  normal database retention and access controls for that operational data.
 - **Wait data is per-node**: on a multi-node Citus / Elastic Cluster, the
   wait-sampling view reflects only the node you connect to. Gather waits from
   each node for the full picture.

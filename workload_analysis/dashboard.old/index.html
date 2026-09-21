@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f2f4ef">
+  <title>Workload Source</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <div class="app-shell">
+    <div id="dataBanner" class="data-banner" role="status">
+      <strong id="bannerLabel">Loading workload data</strong>
+      <span id="bannerDetail">Resolving the classifier export.</span>
+    </div>
+
+    <header class="utility-bar">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+        <strong>Workload Source</strong>
+        <i aria-hidden="true">/</i>
+        <span>comparison dashboard</span>
+      </nav>
+      <div class="connection-state" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="connectionLabel">Locating source</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="control-strip" aria-label="Dashboard controls">
+        <div class="control-field source-field">
+          <span>Data source</span>
+          <div class="fixed-value">
+            <strong id="sourceName">Locating source</strong>
+            <small id="sourceKind">CSV</small>
+          </div>
+        </div>
+
+        <label class="control-field" for="captureSelect">
+          <span>Capture</span>
+          <select id="captureSelect" aria-label="Selected capture">
+            <option>Waiting for data</option>
+          </select>
+        </label>
+
+        <label class="control-field" for="rangeSelect">
+          <span>Window</span>
+          <select id="rangeSelect" aria-label="Capture time window">
+            <option value="24h">Last 24 hours</option>
+            <option value="7d">Last 7 days</option>
+            <option value="all">All captures</option>
+          </select>
+        </label>
+
+        <label class="control-field" for="emphasisSelect">
+          <span>Show emphasis</span>
+          <select id="emphasisSelect" aria-label="Highlighted workload family">
+            <option value="all">All workload families</option>
+            <option value="oltp">OLTP</option>
+            <option value="olap">OLAP</option>
+            <option value="htap">HTAP</option>
+            <option value="timeseries">Time series</option>
+          </select>
+        </label>
+
+        <div class="control-actions">
+          <span>Source actions</span>
+          <div class="action-row">
+            <button class="button" id="refreshButton" type="button">Refresh</button>
+            <button class="button button-primary" id="importButton" type="button">Import CSV</button>
+          </div>
+          <input id="fileInput" type="file" accept=".csv,text/csv" hidden>
+        </div>
+      </section>
+
+      <div id="notice" class="notice" role="status" hidden></div>
+
+      <section class="summary-panel" aria-labelledby="snapshotTitle">
+        <div class="summary-copy">
+          <p class="eyebrow">Workload source overview</p>
+          <h1 id="snapshotTitle">Waiting for workload data</h1>
+          <p id="captureMeta">No observations loaded.</p>
+        </div>
+        <div class="summary-side">
+          <dl class="summary-metrics">
+            <div>
+              <dt>Captures</dt>
+              <dd id="captureTotal">0 / 0</dd>
+            </div>
+            <div>
+              <dt>Dominant</dt>
+              <dd id="dominantValue">--</dd>
+            </div>
+            <div>
+              <dt>Ideal local</dt>
+              <dd id="localValue" class="good">--</dd>
+            </div>
+            <div>
+              <dt>Cross-node</dt>
+              <dd id="crossNodeValue" class="warning">--</dd>
+            </div>
+          </dl>
+          <div class="summary-progress">
+            <div class="progress-track" aria-hidden="true"><span id="localProgress"></span></div>
+            <small id="summaryFootnote">Waiting for source metrics</small>
+          </div>
+        </div>
+      </section>
+
+      <div class="legend-strip" aria-label="Workload family legend">
+        <span><i class="swatch oltp" aria-hidden="true"></i>OLTP</span>
+        <span><i class="swatch olap" aria-hidden="true"></i>OLAP</span>
+        <span><i class="swatch htap" aria-hidden="true"></i>HTAP</span>
+        <span><i class="swatch timeseries" aria-hidden="true"></i>Time series</span>
+        <span><i class="swatch dominant" aria-hidden="true"></i>Dominant profile</span>
+        <span class="legend-help">Columns are captures; values are execution-weighted shares.</span>
+      </div>
+
+      <section class="section-frame matrix-section" aria-labelledby="matrixTitle">
+        <header class="section-heading">
+          <div>
+            <h2 id="matrixTitle">Workload comparison</h2>
+            <p>Compare the four most recent captures in the selected window.</p>
+          </div>
+          <span id="matrixRange" class="section-context">No captures in range</span>
+        </header>
+        <div class="matrix-wrap">
+          <table class="matrix-table">
+            <thead id="matrixHead"></thead>
+            <tbody id="matrixBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section-frame diagnostics-section" aria-labelledby="diagnosticsTitle">
+        <header class="section-heading">
+          <div>
+            <h2 id="diagnosticsTitle">Execution and scaling signals</h2>
+            <p>Locality, shard distribution, and the classifier recommendation for the selected capture.</p>
+          </div>
+          <span class="section-context">Higher locality and fairness are better</span>
+        </header>
+        <div class="diagnostic-grid">
+          <article class="diagnostic-block">
+            <div class="diagnostic-title">
+              <h3>Routing quality</h3>
+              <span id="routeBadge" class="status-badge neutral">Pending</span>
+            </div>
+            <div class="routing-list">
+              <div>
+                <div class="metric-label"><span>Ideal local execution</span><strong id="localBarValue">--</strong></div>
+                <div class="meter"><span id="localBar" class="meter-fill local"></span></div>
+              </div>
+              <div>
+                <div class="metric-label"><span>Cross-node execution</span><strong id="crossBarValue">--</strong></div>
+                <div class="meter"><span id="crossBar" class="meter-fill cross"></span></div>
+              </div>
+              <div>
+                <div class="metric-label"><span>Mean routability</span><strong id="routeBarValue">--</strong></div>
+                <div class="meter"><span id="routeBar" class="meter-fill route"></span></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="diagnostic-block">
+            <div class="diagnostic-title">
+              <h3>Distribution balance</h3>
+              <span id="fairnessState" class="status-badge neutral">Pending</span>
+            </div>
+            <div class="fairness-score">
+              <strong id="fairnessValue">--</strong>
+              <span>shard fairness</span>
+            </div>
+            <div class="fairness-track" aria-hidden="true"><span id="fairnessBar"></span></div>
+            <div class="fairness-labels" aria-hidden="true"><span>Skewed</span><span>Balanced</span></div>
+            <p id="fairnessDetail" class="fairness-detail">Waiting for distribution metrics.</p>
+          </article>
+
+          <article class="diagnostic-block">
+            <div class="diagnostic-title">
+              <h3>Scale decision</h3>
+              <span id="decisionBadge" class="decision-badge neutral">Pending</span>
+            </div>
+            <p id="decisionText" class="decision-text">Load a workload capture to calculate the scaling direction.</p>
+            <div class="decision-signals">
+              <div>
+                <span>Analytical + mixed</span>
+                <strong id="analyticalValue">--</strong>
+              </div>
+              <div>
+                <span>Observations in window</span>
+                <strong id="observationValue">--</strong>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section-frame history-section" aria-labelledby="historyTitle">
+        <header class="section-heading">
+          <div>
+            <h2 id="historyTitle">Capture history</h2>
+            <p>Select a timestamp to compare the dashboard at that point.</p>
+          </div>
+          <span id="historyRange" class="section-context">No captures in range</span>
+        </header>
+        <div class="table-wrap">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th scope="col">Captured</th>
+                <th scope="col">Dominant</th>
+                <th scope="col">OLTP</th>
+                <th scope="col">OLAP</th>
+                <th scope="col">HTAP</th>
+                <th scope="col">Time series</th>
+                <th scope="col">Local</th>
+                <th scope="col">Decision</th>
+              </tr>
+            </thead>
+            <tbody id="historyBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>pg_stat_statements classifier</span>
+      <span id="sourceFootnote">Source unavailable</span>
+    </footer>
+  </div>
+
+  <div id="dropOverlay" class="drop-overlay" aria-hidden="true">
+    <div><strong>Drop workload CSV</strong><span>Release to inspect this source</span></div>
+  </div>
+
+  <script src="dashboard.js" defer></script>
+</body>
+</html>
