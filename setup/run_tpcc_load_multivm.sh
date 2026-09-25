@@ -1,407 +1,356 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() {
-  cat <<'EOF'
-Usage:
-  run_tpcc_load_multivm.sh <hosts_file> <remote_pg_benchmark_dir> <pg_config_path> <hammerdb_install_dir> <work_root> [total_warehouses]
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/lib/common.sh"
 
-Purpose:
-  Load data using many runner VMs (no benchmark run). This script performs:
-  1) cleanup once on first runner
-  2) Phase 1 bootstrap on first runner (warehouse 1)
-  3) Phase 2 parallel data load on all runners for remaining warehouses
-  4) Phase 3 post-data DDL on first runner (PG_FIRST_WARE=1 PG_COUNT_WARE=0)
+usage()
+{
+    cat <<'EOF'
+Usage: run_tpcc_load_multivm.sh HOSTS_FILE REMOTE_REPO [TOTAL_WAREHOUSES]
+    [--connection-env FILE] [--benchmark-env FILE] [--run-env FILE]
 
-Example:
-  ./setup/run_tpcc_load_multivm.sh \
-    ./hosts.txt \
-    /opt/HammerDB/pg_benchmark \
-    /usr/bin/pg_config \
-    /opt/HammerDB \
-    /tmp/hdb-load
+Load the three configuration groups used by wrapper.sh hammerdb, check all
+runners, clean up once, bootstrap warehouse 1, load disjoint warehouse ranges,
+then finalize post-data DDL. This does not run benchmark iterations.
 
-  # Or provide the warehouse count explicitly:
-  ./setup/run_tpcc_load_multivm.sh \
-    ./hosts.txt \
-    /opt/HammerDB/pg_benchmark \
-    /usr/bin/pg_config \
-    /opt/HammerDB \
-    /tmp/hdb-load \
-    1000000
+Requires PG_TARGET_MODE=existing and RUN_ALLOW_DESTRUCTIVE=true.
+TOTAL_WAREHOUSES defaults to HDB_WAREHOUSES; build VUs come from HDB_BUILD_VUS
+and are capped to each slice. HAMMERDB_HOME, PG_PSQL, PGPASSFILE (if used),
+and RUN_OUTPUT_ROOT are paths on the runners.
 
-Required env vars on pilot:
-  PGHOST PGPORT PGPASSWORD PG_SUPERUSER PG_USER PG_DBASE PG_DEFAULTDBASE
+Optional pilot settings:
+  LOG_DIR   Local orchestration log directory (default: a unique logs/load-*).
+  SSH_OPTS  Additional whitespace-separated SSH arguments (not shell code).
 
-Optional env vars:
-  ENABLE_CITUS=true|false         default: true
-  PHASE2_NUM_VU=<n>               default: PG_NUM_VU (or 200 if PG_NUM_VU unset)
-  SSH_OPTS='-o StrictHostKeyChecking=accept-new'
-  LOG_DIR=<dir>                   default: ./logs/load-<timestamp>
-  PG_COUNT_WARE=<n>               used when total_warehouses is omitted
-
-Notes:
-  - Warehouse slices are computed automatically from hosts_file.
-  - On each runner, myenv.sh is generated from myenv.sh.sample, patched with
-    runner-specific values, sourced, then wrapper.sh is executed.
+Use the matching CONNECTION_ENV_FILE, BENCHMARK_ENV_FILE, RUN_ENV_FILE
+variables instead of file flags if preferred. No shared remote config is edited.
+Selected files must be complete private configurations, not .sample templates.
 EOF
 }
 
-if [[ $# -lt 5 || $# -gt 6 ]]; then
-  usage
-  exit 1
-fi
-
-HOSTS_FILE="$1"
-REMOTE_DIR="$2"
-PG_CONFIG_PATH="$3"
-HAMMERDB_HOME="$4"
-WORK_ROOT="$5"
-TOTAL_WARE="${6:-${PG_COUNT_WARE:-}}"
-
-: "${PGHOST:?PGHOST is required}"
-: "${PGPORT:?PGPORT is required}"
-: "${PGPASSWORD:?PGPASSWORD is required}"
-: "${PG_SUPERUSER:?PG_SUPERUSER is required}"
-: "${PG_USER:?PG_USER is required}"
-: "${PG_DBASE:?PG_DBASE is required}"
-: "${PG_DEFAULTDBASE:?PG_DEFAULTDBASE is required}"
-
-ENABLE_CITUS="${ENABLE_CITUS:-true}"
-PHASE2_NUM_VU="${PHASE2_NUM_VU:-${PG_NUM_VU:-200}}"
-SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=accept-new}"
-LOG_DIR="${LOG_DIR:-./logs/load-$(date +%Y%m%d-%H%M%S)}"
-
-case "$ENABLE_CITUS" in
-  true)
-    CITUS_FLAG="-c"
-    CLEANUP_SQL="hammerdb/hammerdb_cleanup_citus.sql"
-    ;;
-  false)
-    CITUS_FLAG=""
-    CLEANUP_SQL="hammerdb/hammerdb_cleanup.sql"
-    ;;
-  *)
-    echo "ENABLE_CITUS must be 'true' or 'false'" >&2
-    exit 1
-    ;;
-esac
-
-mkdir -p "$LOG_DIR"
-
-if [[ ! -f "$HOSTS_FILE" ]]; then
-  echo "hosts file not found: $HOSTS_FILE" >&2
-  exit 1
-fi
-
-if [[ -z "$TOTAL_WARE" ]]; then
-  echo "total_warehouses is required either as the 6th argument or via PG_COUNT_WARE" >&2
-  exit 1
-fi
-
-if ! [[ "$TOTAL_WARE" =~ ^[0-9]+$ ]] || [[ "$TOTAL_WARE" -le 0 ]]; then
-  echo "total_warehouses must be a positive integer" >&2
-  exit 1
-fi
-
-if ! [[ "$PHASE2_NUM_VU" =~ ^[0-9]+$ ]] || [[ "$PHASE2_NUM_VU" -le 0 ]]; then
-  echo "PHASE2_NUM_VU must be a positive integer" >&2
-  exit 1
-fi
-
-mapfile -t HOSTS < <(grep -vE '^\s*($|#)' "$HOSTS_FILE")
-if [[ ${#HOSTS[@]} -eq 0 ]]; then
-  echo "no hosts found in $HOSTS_FILE" >&2
-  exit 1
-fi
-
-RUNNER_COUNT=${#HOSTS[@]}
-FIRST_RUNNER="${HOSTS[0]}"
-BASE_SLICE=$(( TOTAL_WARE / RUNNER_COUNT ))
-REMAINDER=$(( TOTAL_WARE % RUNNER_COUNT ))
-
-if [[ $BASE_SLICE -eq 0 ]]; then
-  echo "total_warehouses ($TOTAL_WARE) must be >= number of runners ($RUNNER_COUNT)" >&2
-  exit 1
-fi
-
-RANGE_HOSTS=()
-RANGE_FIRSTS=()
-RANGE_COUNTS=()
-RANGE_ENDS=()
-
-build_range_plan() {
-  local first=1
-  local covered=0
-  local expected_first=1
-
-  for i in "${!HOSTS[@]}"; do
-    local host="${HOSTS[$i]}"
-    local extra=0
-    local slice
-    local last
-
-    if [[ $i -lt $REMAINDER ]]; then
-      extra=1
-    fi
-    slice=$(( BASE_SLICE + extra ))
-    last=$(( first + slice - 1 ))
-
-    RANGE_HOSTS+=("$host")
-    RANGE_FIRSTS+=("$first")
-    RANGE_COUNTS+=("$slice")
-    RANGE_ENDS+=("$last")
-
-    if [[ $first -ne $expected_first ]]; then
-      echo "range plan error: expected next first warehouse $expected_first, got $first for host $host" >&2
-      exit 1
-    fi
-
-    covered=$(( covered + slice ))
-    expected_first=$(( last + 1 ))
-    first=$(( last + 1 ))
-  done
-
-  if [[ $covered -ne $TOTAL_WARE ]]; then
-    echo "range plan error: covered $covered warehouses, expected $TOTAL_WARE" >&2
-    exit 1
-  fi
-
-  if [[ ${RANGE_FIRSTS[0]} -ne 1 ]]; then
-    echo "range plan error: first slice must start at warehouse 1" >&2
-    exit 1
-  fi
-
-  local last_idx=$(( ${#RANGE_ENDS[@]} - 1 ))
-  if [[ ${RANGE_ENDS[$last_idx]} -ne $TOTAL_WARE ]]; then
-    echo "range plan error: final slice ends at ${RANGE_ENDS[$last_idx]}, expected $TOTAL_WARE" >&2
-    exit 1
-  fi
+usage_error()
+{
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 2
 }
 
-print_range_plan() {
-  echo "Phase 2 range plan:"
-  for i in "${!RANGE_HOSTS[@]}"; do
-    echo "  ${RANGE_HOSTS[$i]} first=${RANGE_FIRSTS[$i]} count=${RANGE_COUNTS[$i]} last=${RANGE_ENDS[$i]}"
-  done
-}
-
-print_effective_coverage() {
-  local phase2_start phase2_end
-  local last_idx=$(( ${#RANGE_ENDS[@]} - 1 ))
-
-  phase2_start="${RANGE_FIRSTS[0]}"
-  phase2_end="${RANGE_ENDS[$last_idx]}"
-
-  echo "Coverage summary:"
-  echo "  Phase 1 (bootstrap): warehouses 1..1 on $FIRST_RUNNER"
-  echo "  Phase 2 (parallel): warehouses ${phase2_start}..${phase2_end} across ${#RANGE_HOSTS[@]} runners"
-  echo "  Full expected coverage: warehouses 1..$TOTAL_WARE"
-}
-
-build_range_plan
-
-# Phase 1 bootstraps warehouse 1 on the first runner. Phase 2 should therefore
-# start from warehouse 2 and load the remaining range in parallel.
-if [[ ${#RANGE_COUNTS[@]} -gt 0 ]]; then
-  RANGE_FIRSTS[0]=$(( RANGE_FIRSTS[0] + 1 ))
-  RANGE_COUNTS[0]=$(( RANGE_COUNTS[0] - 1 ))
-fi
-
-safe_host() {
-  echo "$1" | tr -c 'a-zA-Z0-9._-' '_'
-}
-
-run_remote_prepare() {
-  local host="$1"
-  local first_ware="$2"
-  local count_ware="$3"
-  local num_vu="$4"
-  local log_file="$5"
-  local remote_work_dir="$WORK_ROOT/$(safe_host "$host")"
-
-  ssh $SSH_OPTS "$host" "
-    set -euo pipefail
-    cd '$REMOTE_DIR'
-    mkdir -p '$remote_work_dir'
-    if [[ ! -f myenv.sh.sample ]]; then
-      echo 'missing myenv.sh.sample in $REMOTE_DIR' >&2
-      exit 1
-    fi
-    cp myenv.sh.sample myenv.sh
-    cat >> myenv.sh <<'MYENV_APPEND'
-export PGHOST='$PGHOST'
-export PGPORT='$PGPORT'
-export PGPASSWORD='$PGPASSWORD'
-export PG_SUPERUSER='$PG_SUPERUSER'
-export PG_USER='$PG_USER'
-export PG_DBASE='$PG_DBASE'
-export PG_DEFAULTDBASE='$PG_DEFAULTDBASE'
-export ENABLE_CITUS='$ENABLE_CITUS'
-export PG_FIRST_WARE='$first_ware'
-export PG_COUNT_WARE='$count_ware'
-export PG_NUM_VU='$num_vu'
-export PG_VU='$num_vu'
-MYENV_APPEND
-    source ./myenv.sh
-    ./wrapper.sh \
-      -C '$PG_CONFIG_PATH' -H '$HAMMERDB_HOME' \
-      -t '$remote_work_dir' $CITUS_FLAG -P
-  " >"$log_file" 2>&1
-}
-
-run_cleanup_on_first_runner() {
-  local host="$1"
-  local log_file="$2"
-
-  ssh $SSH_OPTS "$host" "
-    set -euo pipefail
-    cd '$REMOTE_DIR'
-    export PGPASSWORD='$PGPASSWORD'
-    psql -v ON_ERROR_STOP=1 \
-      -h '$PGHOST' -p '$PGPORT' -U '$PG_USER' -d '$PG_DBASE' \
-      -f '$CLEANUP_SQL'
-  " >"$log_file" 2>&1
-}
-
-now_epoch() {
-  date +%s
-}
-
-fmt_duration() {
-  local total="$1"
-  local h m s
-  h=$(( total / 3600 ))
-  m=$(( (total % 3600) / 60 ))
-  s=$(( total % 60 ))
-  printf "%02dh:%02dm:%02ds" "$h" "$m" "$s"
-}
-
-total_start="$(now_epoch)"
-phase_cleanup_secs=0
-phase1_secs=0
-phase2_secs=0
-phase3_secs=0
-
-echo "Runners: ${HOSTS[*]}"
-echo "Total warehouses: $TOTAL_WARE"
-echo "Base slice: $BASE_SLICE remainder: $REMAINDER"
-echo "Log dir: $LOG_DIR"
-print_range_plan
-print_effective_coverage
-
-echo "[cleanup] once on first runner: $FIRST_RUNNER"
-phase_start="$(now_epoch)"
-run_cleanup_on_first_runner "$FIRST_RUNNER" "$LOG_DIR/cleanup.$(safe_host "$FIRST_RUNNER").log"
-phase_cleanup_secs=$(( $(now_epoch) - phase_start ))
-echo "[cleanup] completed in $(fmt_duration "$phase_cleanup_secs")"
-
-echo "[phase1] ddl on first runner: $FIRST_RUNNER"
-phase_start="$(now_epoch)"
-run_remote_prepare "$FIRST_RUNNER" 1 1 1 "$LOG_DIR/phase1.$(safe_host "$FIRST_RUNNER").log"
-phase1_secs=$(( $(now_epoch) - phase_start ))
-echo "[phase1] completed in $(fmt_duration "$phase1_secs")"
-
-echo "[phase2] parallel data load"
-phase_start="$(now_epoch)"
-pids=()
-host_for_pid=()
-phase2_host_start_secs=()
-phase2_host_elapsed_secs=()
-phase2_host_meta_files=()
-for i in "${!RANGE_HOSTS[@]}"; do
-  host="${RANGE_HOSTS[$i]}"
-  first="${RANGE_FIRSTS[$i]}"
-  slice="${RANGE_COUNTS[$i]}"
-  last="${RANGE_ENDS[$i]}"
-
-  if [[ "$slice" -le 0 ]]; then
-    continue
-  fi
-
-  vu="$PHASE2_NUM_VU"
-  if [[ $vu -gt $slice ]]; then
-    vu="$slice"
-  fi
-
-  log_file="$LOG_DIR/phase2.$(safe_host "$host").log"
-  meta_file="$LOG_DIR/phase2.$(safe_host "$host").timing"
-  rm -f "$meta_file"
-  echo "  $host first=$first last=$last count=$slice num_vu=$vu"
-  host_start="$(now_epoch)"
-  (
-    host_job_start="$(now_epoch)"
-    run_remote_prepare "$host" "$first" "$slice" "$vu" "$log_file"
-    rc="$?"
-    host_job_end="$(now_epoch)"
-    echo "$((host_job_end - host_job_start)) $rc" > "$meta_file"
-    exit "$rc"
-  ) &
-  pids+=("$!")
-  host_for_pid+=("$host")
-  phase2_host_start_secs+=("$host_start")
-  phase2_host_elapsed_secs+=("0")
-  phase2_host_meta_files+=("$meta_file")
+connection_file="${CONNECTION_ENV_FILE:-}"
+benchmark_file="${BENCHMARK_ENV_FILE:-}"
+run_file="${RUN_ENV_FILE:-}"
+arguments=()
+while (($#)); do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --connection-env|--benchmark-env|--run-env)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || usage_error "$1 requires a filename"
+            case "$1" in
+                --connection-env) connection_file="$2" ;;
+                --benchmark-env) benchmark_file="$2" ;;
+                --run-env) run_file="$2" ;;
+            esac
+            shift 2
+            ;;
+        -*) usage_error "Unknown option: $1" ;;
+        *) arguments+=("$1"); shift ;;
+    esac
 done
+[[ ${#arguments[@]} -ge 2 && ${#arguments[@]} -le 3 ]] || { usage >&2; exit 2; }
 
-phase2_failed=0
-for i in "${!pids[@]}"; do
-  host_elapsed=""
+load_configuration "$ROOT" hammerdb "$connection_file" "$benchmark_file" "$run_file"
+HOSTS_FILE="${arguments[0]}"
+REMOTE_REPO="${arguments[1]}"
+TOTAL_WAREHOUSES="${arguments[2]:-$HDB_WAREHOUSES}"
+validate_integer TOTAL_WAREHOUSES "$TOTAL_WAREHOUSES" 1
+validate_integer HDB_BUILD_VUS "$HDB_BUILD_VUS" 1
+[[ "$PG_TARGET_MODE" == existing ]] || { fail "Distributed loading requires PG_TARGET_MODE=existing"; exit 1; }
 
-  if ! wait "${pids[$i]}"; then
-    if [[ -f "${phase2_host_meta_files[$i]}" ]]; then
-      read -r host_elapsed _ < "${phase2_host_meta_files[$i]}" || true
+[[ "$RUN_ALLOW_DESTRUCTIVE" == true ]] || { fail "Distributed loading requires RUN_ALLOW_DESTRUCTIVE=true"; exit 1; }
+
+[[ -n "$REMOTE_REPO" && -r "$HOSTS_FILE" ]] || { fail "Provide a readable hosts file and remote repository path"; exit 1; }
+
+require_command ssh
+
+read_runner_hosts "$HOSTS_FILE"
+((TOTAL_WAREHOUSES >= ${#HOSTS[@]})) || { fail "Warehouse count must be at least the runner count"; exit 1; }
+
+SSH_ARGUMENTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
+if [[ -n "${SSH_OPTS:-}" ]];
+then
+    read -r -a extra_ssh_arguments <<<"$SSH_OPTS"
+    SSH_ARGUMENTS+=("${extra_ssh_arguments[@]}")
+fi
+
+umask 077
+if [[ -n "${LOG_DIR:-}" ]];
+then
+    LOG_DIR="$(absolute_path "$LOG_DIR")"
+    mkdir -p -- "$LOG_DIR"
+else
+    mkdir -p ./logs
+    LOG_DIR="$(absolute_path ./logs)/load-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+    mkdir -- "$LOG_DIR"
+fi
+
+BATCH_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+WORK_ROOT="$RUN_OUTPUT_ROOT"
+
+safe_host()
+{
+    printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+# Quote values as Bash literals, preserving spaces and metacharacters remotely.
+serialize_environment()
+{
+    local key
+    for key in "$@"; do
+        if [[ -v "$key" ]];
+        then
+            local -n setting="$key"
+            printf 'export %s=%q\n' "$key" "$setting" || return 1
+            unset -n setting
+        fi
+
+    done
+}
+
+# Each phase gets complete private configs without changing shared runner files.
+remote_request()
+{
+    local local_host="$1" phase="$2" action="$3"
+    local connection_payload benchmark_payload run_payload
+    local -x HDB_FIRST_WAREHOUSE="$4" HDB_WAREHOUSES="$5" HDB_BUILD_VUS="$6"
+    local -x HDB_RUN_VUS="$HDB_BUILD_VUS"
+    local -x HDB_DISTRIBUTED_LOAD=true HDB_RESET_SCHEMA=false
+    local -x RUN_PREPARE_MODE=reuse RUN_ITERATIONS=1
+    local -x RUN_OUTPUT_ROOT
+    RUN_OUTPUT_ROOT="$WORK_ROOT/load-$BATCH_ID/$(safe_host "$local_host")/$phase"
+    connection_payload="$(serialize_environment PGHOST PGPORT PGDATABASE PGUSER PGSSLMODE \
+        PGCONNECT_TIMEOUT PGMAINTENANCE_DB PG_TARGET_MODE PG_PSQL PGPASSWORD PGPASSFILE \
+        PG_CONFIG PG_SERVER_ENV_FILE PG_INIT_SQL PG_REMOVE_DATA)" || return 1
+    benchmark_payload="$(serialize_environment HAMMERDB_HOME HDB_WORKLOAD HDB_WAREHOUSES \
+        HDB_FIRST_WAREHOUSE HDB_BUILD_VUS HDB_RUN_VUS HDB_RAMPUP_MINUTES HDB_DURATION_MINUTES \
+        HDB_SUPERUSER HDB_SUPERUSER_PASSWORD HDB_CITUS_COMPAT HDB_CITUS_LOADBALANCER_PORT \
+        HDB_CITUS_DIRECT_WORKERS HDB_DISTRIBUTED_LOAD HDB_RESET_SCHEMA HDB_MAINTENANCE HDB_VACUUM)" || return 1
+    run_payload="$(serialize_environment RUN_ITERATIONS RUN_OUTPUT_ROOT RUN_LABEL \
+        RUN_PREPARE_MODE RUN_COOLDOWN_SECONDS RUN_TIMEOUT_SECONDS RUN_ALLOW_DESTRUCTIVE)" || return 1
+    printf 'remote_repo=%q\nremote_action=%q\nrequest_phase=%q\n' "$REMOTE_REPO" "$action" "$phase" || return 1
+    printf 'connection_payload=%q\nbenchmark_payload=%q\nrun_payload=%q\n' \
+        "$connection_payload" "$benchmark_payload" "$run_payload" || return 1
+    # Leave remote paths and process IDs for the remote shell to expand.
+    cat <<'REMOTE'
+set -euo pipefail
+umask 077
+cd -- "$remote_repo"
+mkdir -p -- ./benchmark-results
+request_dir="$PWD/benchmark-results/.request-$$-$RANDOM"
+mkdir -- "$request_dir"
+worker_pid=""
+cleanup_request()
+{
+    rm -f -- "$request_dir/connection.env" "$request_dir/benchmark.env" "$request_dir/run.env"
+    rmdir -- "$request_dir"
+}
+
+interrupt_request()
+{
+    trap - INT TERM HUP
+    if [[ -n "$worker_pid" ]];
+    then
+        kill -TERM "$worker_pid" 2>/dev/null || :
+        wait "$worker_pid" 2>/dev/null || :
     fi
-    if ! [[ "${host_elapsed:-}" =~ ^[0-9]+$ ]]; then
-      host_elapsed=$(( $(now_epoch) - phase2_host_start_secs[$i] ))
+
+    exit 143
+}
+
+trap cleanup_request EXIT
+trap interrupt_request INT TERM HUP
+printf '%s\n' "$connection_payload" >"$request_dir/connection.env"
+printf '%s\n' "$benchmark_payload" >"$request_dir/benchmark.env"
+printf '%s\n' "$run_payload" >"$request_dir/run.env"
+unset connection_payload benchmark_payload run_payload
+unset PGPASSWORD PGPASSFILE HDB_SUPERUSER_PASSWORD
+printf '[%s] Repository: %s\n' "$request_phase" "$remote_repo"
+./wrapper.sh hammerdb "$remote_action" \
+    --connection-env "$request_dir/connection.env" \
+    --benchmark-env "$request_dir/benchmark.env" \
+    --run-env "$request_dir/run.env" &
+worker_pid=$!
+result=0
+wait "$worker_pid" || result=$?
+worker_pid=""
+exit "$result"
+REMOTE
+}
+
+remote_job() (
+    host="$1" phase="$2" action="$3" first="$4" count="$5" vus="$6"
+    logfile="$LOG_DIR/$phase.$(safe_host "$host").log"
+    ssh_pid=""
+    request_file=""
+    trap '
+        if [[ -n "$request_file" ]];
+        then
+            rm -f -- "$request_file";
+            rmdir -- "${request_file%/*}";
+        fi
+
+    ' EXIT
+    trap '
+        if [[ -n "$ssh_pid" ]];
+        then
+            kill -TERM "$ssh_pid" 2>/dev/null || :;
+            wait "$ssh_pid" 2>/dev/null || :;
+        fi;
+
+        exit 143
+    ' INT TERM HUP
+    started="$SECONDS"
+    request_directory="$LOG_DIR/.request-$BASHPID-$RANDOM"
+    mkdir -- "$request_directory"
+    request_file="$request_directory/config.env"
+    if ! remote_request "$host" "$phase" "$action" "$first" "$count" "$vus" >"$request_file";
+    then
+        printf 'ERROR: Could not serialize configuration for %s on %s\n' "$phase" "$host" >&2
+        exit 1
     fi
-    phase2_host_elapsed_secs[$i]="$host_elapsed"
-    echo "[phase2] FAILED on ${host_for_pid[$i]} (see $LOG_DIR/phase2.$(safe_host "${host_for_pid[$i]}").log)" >&2
-    echo "[phase2] ${host_for_pid[$i]} elapsed: $(fmt_duration "$host_elapsed")" >&2
-    phase2_failed=1
-  else
-    if [[ -f "${phase2_host_meta_files[$i]}" ]]; then
-      read -r host_elapsed _ < "${phase2_host_meta_files[$i]}" || true
+
+    # Credentials travel through stdin, not SSH command-line arguments.
+    ssh "${SSH_ARGUMENTS[@]}" -- "$host" bash -s \
+        <"$request_file" \
+        >"$logfile" 2>&1 &
+    ssh_pid=$!
+    result=0
+    wait "$ssh_pid" || result=$?
+    ssh_pid=""
+    printf 'elapsed_seconds=%s\nexit_code=%s\n' "$((SECONDS - started))" "$result" >"$logfile.status"
+    if ((result != 0));
+    then
+        printf 'ERROR: %s failed on %s (exit %s); see %s\n' "$phase" "$host" "$result" "$logfile" >&2
+        if ((result == 255));
+        then
+            printf 'Remote completion is unknown after SSH failure; inspect %s before retrying.\n' "$host" >&2
+        fi
+
     fi
-    if ! [[ "${host_elapsed:-}" =~ ^[0-9]+$ ]]; then
-      host_elapsed=$(( $(now_epoch) - phase2_host_start_secs[$i] ))
+
+    exit "$result"
+)
+
+active_jobs=()
+stop_jobs()
+{
+    local pid
+    for pid in "${active_jobs[@]}"; do
+        if [[ -n "$pid" ]];
+        then
+            kill -TERM "$pid" 2>/dev/null || :;
+        fi
+
+    done
+    for pid in "${active_jobs[@]}"; do
+        if [[ -n "$pid" ]];
+        then
+            wait "$pid" 2>/dev/null || :;
+        fi
+
+    done
+    active_jobs=()
+}
+
+trap stop_jobs EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+run_single()
+{
+    local result=0
+    # Even serial phases run as jobs so signal traps can stop their SSH process.
+    remote_job "$@" &
+    active_jobs=("$!")
+    wait "${active_jobs[0]}" || result=$?
+    active_jobs=()
+    return "$result"
+}
+
+# Reserve warehouse 1 for bootstrap; assign disjoint slices to the data jobs.
+firsts=() counts=()
+next=1
+base=$((TOTAL_WAREHOUSES / ${#HOSTS[@]}))
+remainder=$((TOTAL_WAREHOUSES % ${#HOSTS[@]}))
+printf 'Warehouse plan (warehouse 1 is bootstrapped separately):\n'
+for ((index = 0; index < ${#HOSTS[@]}; index++)); do
+    count="$base"
+    if ((index < remainder));
+    then
+        count=$((count + 1));
     fi
-    phase2_host_elapsed_secs[$i]="$host_elapsed"
-    echo "[phase2] ${host_for_pid[$i]} completed in $(fmt_duration "$host_elapsed")"
-  fi
+
+    first="$next"
+    next=$((next + count))
+    if ((index == 0));
+    then
+        first=2;
+        count=$((count - 1));
+    fi
+
+    firsts+=("$first")
+    counts+=("$count")
+    if ((count > 0));
+    then
+        printf '  %s first=%s count=%s last=%s\n' "${HOSTS[$index]}" "$first" "$count" "$((first + count - 1))"
+    fi
+
 done
+printf 'Log directory: %s\n' "$LOG_DIR"
+total_start="$SECONDS"
 
-if [[ $phase2_failed -ne 0 ]]; then
-  phase2_secs=$(( $(now_epoch) - phase_start ))
-  echo "[phase2] elapsed before failure: $(fmt_duration "$phase2_secs")" >&2
-  echo "[phase2] one or more runners failed; aborting before phase3" >&2
-  exit 1
-fi
-phase2_secs=$(( $(now_epoch) - phase_start ))
-echo "[phase2] completed in $(fmt_duration "$phase2_secs")"
+printf '[preflight] Checking all runners before cleanup\n'
+for host in "${HOSTS[@]}"; do
+    run_single "$host" preflight --check 1 1 1
+done
+printf '[cleanup] Removing existing benchmark objects on %s\n' "${HOSTS[0]}"
+run_single "${HOSTS[0]}" cleanup --cleanup 1 1 1
+printf '[phase1] Bootstrapping warehouse 1\n'
+phase_start="$SECONDS"
+run_single "${HOSTS[0]}" bootstrap --prepare 1 1 1
+phase1_seconds=$((SECONDS - phase_start))
 
-if [[ ${#host_for_pid[@]} -gt 0 ]]; then
-  echo "[phase2] host timing summary"
-  for i in "${!host_for_pid[@]}"; do
-    echo "  ${host_for_pid[$i]} : $(fmt_duration "${phase2_host_elapsed_secs[$i]}")"
-  done
-fi
+printf '[phase2] Loading remaining warehouse ranges\n'
+phase_start="$SECONDS"
+for ((index = 0; index < ${#HOSTS[@]}; index++)); do
+    count="${counts[$index]}"
+    ((count > 0)) || continue
+    vus="$HDB_BUILD_VUS"
+    if ((vus > count));
+    then
+        vus="$count";
+    fi
 
-echo "[phase3] post-data ddl on first runner: $FIRST_RUNNER"
-phase_start="$(now_epoch)"
-run_remote_prepare "$FIRST_RUNNER" 1 0 1 "$LOG_DIR/phase3.$(safe_host "$FIRST_RUNNER").log"
-phase3_secs=$(( $(now_epoch) - phase_start ))
-echo "[phase3] completed in $(fmt_duration "$phase3_secs")"
+    remote_job "${HOSTS[$index]}" data --prepare "${firsts[$index]}" "$count" "$vus" &
+    active_jobs+=("$!")
+done
+# Every data job must succeed before post-data DDL is allowed to run.
+phase2_failed=false
+for ((index = 0; index < ${#active_jobs[@]}; index++)); do
+    if ! wait "${active_jobs[$index]}";
+    then
+        phase2_failed=true;
+    fi
 
-total_secs=$(( $(now_epoch) - total_start ))
+    active_jobs[$index]=""
+done
+active_jobs=()
+[[ "$phase2_failed" == false ]] || { fail "At least one data loader failed; refusing post-data DDL"; exit 1; }
 
-echo
-echo "Timing summary"
-echo "  cleanup : $(fmt_duration "$phase_cleanup_secs")"
-echo "  phase1  : $(fmt_duration "$phase1_secs")"
-echo "  phase2  : $(fmt_duration "$phase2_secs")"
-echo "  phase3  : $(fmt_duration "$phase3_secs")"
-echo "  total   : $(fmt_duration "$total_secs")"
+phase2_seconds=$((SECONDS - phase_start))
 
-echo "Load completed successfully."
-echo "Logs: $LOG_DIR"
+printf '[phase3] Finalizing post-data DDL\n'
+phase_start="$SECONDS"
+run_single "${HOSTS[0]}" finalize --prepare 1 0 1
+phase3_seconds=$((SECONDS - phase_start))
+printf 'Load completed successfully.\nTiming (seconds): bootstrap=%s parallel=%s finalize=%s total=%s\n' \
+    "$phase1_seconds" "$phase2_seconds" "$phase3_seconds" "$((SECONDS - total_start))"
+printf 'Logs: %s\n' "$LOG_DIR"

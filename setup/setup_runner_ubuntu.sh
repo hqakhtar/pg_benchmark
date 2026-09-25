@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Dedicated runners only: provisioning upgrades packages and stops system PG.
 POSTGRES_VERSION="${POSTGRES_VERSION:-17}"
 REPOSITORY_URL="${REPOSITORY_URL:-https://github.com/hqakhtar/pg_benchmark.git}"
 REPOSITORY_DESTINATION="${REPOSITORY_DESTINATION:-$HOME/pg_benchmark}"
@@ -19,6 +20,7 @@ sudo apt-get install -y \
 	"postgresql-$POSTGRES_VERSION" \
 	"postgresql-client-$POSTGRES_VERSION" \
 	"postgresql-server-dev-$POSTGRES_VERSION"
+# Leave local cluster startup to the benchmark runner.
 sudo systemctl disable --now postgresql
 command -v psql
 
@@ -32,13 +34,14 @@ EOL
 
 grep -qxF "ulimit -n 65536" ~/.bashrc || echo "ulimit -n 65536" >> ~/.bashrc
 
-if [[ -d "$REPOSITORY_DESTINATION/.git" ]]; then
+if [[ -d "$REPOSITORY_DESTINATION/.git" ]];
+then
 	git -C "$REPOSITORY_DESTINATION" pull --ff-only
-elif [[ -e "$REPOSITORY_DESTINATION" ]]; then
+elif [[ -e "$REPOSITORY_DESTINATION" ]];
+then
 	echo "Repository destination exists but is not a Git checkout:" \
 		"$REPOSITORY_DESTINATION" >&2
 	exit 1
 else
 	git clone "$REPOSITORY_URL" "$REPOSITORY_DESTINATION"
 fi
-

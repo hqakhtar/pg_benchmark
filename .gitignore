@@ -1,10 +1,15 @@
 # Local connection and host configuration
 /myenv*
-!/myenv.sh.sample
 /hosts.txt*
 !/hosts.txt.sample
+/unwanted/myenv*
+/unwanted/hosts.txt*
 /setup/ansible/inventory.local.ini
 /setup/ansible/vars.local.yml
+# Runtime configuration is private; only environment templates are shipped.
+*.[eE][nN][vV]
+*.[eE][nN][vV].*
+!*.[eE][nN][vV].[sS][aA][mM][pP][lL][eE]
 
 # Benchmark output
 /logs/
@@ -12,6 +17,7 @@
 /workload_analysis/dashboard.old/
 *.log
 *.timing
+/tests/.work/
 
 # Local backup and patch files
 *.orig

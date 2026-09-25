@@ -1,609 +1,193 @@
 #!/usr/bin/env bash
+set -Eeuo pipefail
 
-# SCRIPT: wrapper.sh
-#-----------------------------
-# See usage on how to run this script.
-#
-# * REQUIRES:
-#   - $PG_CONF_FILE
-#   - $BENCHMARK_SCRIPT
+# Resolve assets relative to this script, not the caller's directory.
+FRAMEWORK_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly FRAMEWORK_ROOT
+source "$FRAMEWORK_ROOT/lib/common.sh"
 
-set -o pipefail
-
-## GLOBAL VARIABLES
-
-# Paths and file names
-export SCRIPT_DIR="$(
-    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd
-)"
-export WORK_DIR=""
-export HAMMERDB_INSTALL_DIR=""
-
-# Only supporting hammerdb currently
-export BENCHMARK_TYPE="hammerdb"
-
-# Script variables
-export ITERATIONS="${ITERATIONS:-3}"
-export BENCHMARK_NAME="${BENCHMARK_NAME:-tpcc}"
-export PG_CONF_FILE="${PG_CONF_FILE:-$SCRIPT_DIR/pg.env}"
-export ENV_FILE="${ENV_FILE:-}"
-export BENCHMARK_SCRIPT="$BENCHMARK_TYPE/${BENCHMARK_SCRIPT:-$BENCHMARK_TYPE.sh}"
-export PG_VERSION=""
-
-export PRELOAD_LIBRARY=""
-export PG_INIT_SQL=""
-export INITDB=""
-export BUILD_SCHEMA=""
-export BUILD_SCHEMA_ONCE=""
-export PREPARE_ONLY=""
-export REMOVE_DATA_DIR=""
-export CITUS_COMPAT_MODE=""
-export CHECK_ONLY=""
-
-
-## USAGE
 usage()
 {
-    errorCode=${1:-0}
+    cat <<'EOF'
+Usage: wrapper.sh BENCHMARK [OPTIONS]
+       wrapper.sh --setup [--host HOST] [-- ANSIBLE_OPTIONS]
+       wrapper.sh --setup-control-machine
 
-    cat << EOF
+Load connection, benchmark, and run environments, then invoke the selected
+benchmark adapter. Only modules shipped in this checkout are supported.
+Setup instead provisions runner machines through Ansible, without loading
+benchmark environments or running a benchmark.
 
-usage: $0 [--check] OPTIONS
+Options:
+  --setup-control-machine Install local provisioning tools (Ubuntu/Debian)
+  --setup                 Provision all VMs in this checkout's hosts.txt
+  --host HOST             Provision just this VM (setup only; need not be listed)
+  --check                 Validate configuration without connecting or running
+  --prepare               Prepare data without running iterations
+  --cleanup               Remove benchmark data (requires destructive opt-in)
+  --connection-env FILE    Select a complete private connection configuration
+  --benchmark-env FILE     Select a complete private benchmark configuration
+  --run-env FILE           Select a complete private run configuration
+  -h, --help              Show this help
 
-This script benchmarks PostgreSQL with an optional preload library.
-
-Supported configurations:
-- PG
-- Any preload shared library passed as an argument.
-
-By default, this script runs against an EXISTING PostgreSQL cluster. To set up
-a new cluster, use the -I (initdb), -S (build schema), and -Z (remove data dir)
-options.
-
-PostgreSQL settings are read from $PG_CONF_FILE. TPCC settings have portable
-defaults and can be overridden with -E or environment variables. It also
-expects that $BENCHMARK_SCRIPT resides in the "$SCRIPT_DIR/$BENCHMARK_TYPE"
-directory.
-
-Some options can also be set via environment variables. The relevant
-variable is provided with each option. However, some arguments are mandatory
-to prevent any accidental environment/data corruption.
-
-OPTIONS can be:
-
-    -h, --help            Show this message
-    --check               Validate configuration and exit without benchmarking
-
-  -C  [PG_CONFIG]       pg_config path                   [REQUIRED]
-  -H                    HammerDB installation dir        [REQUIRED]
-  -t                    Script working folder            [REQUIRED]
-                        * a folder where data directory and relevant log
-                          files may be created.
-
-    -b  [BENCHMARK_TYPE]  Type of benchmark to run
-                                                [Default: $BENCHMARK_TYPE]
-  -c                    Enable Citus compatibility       [Default: not set]
-  -e  [PG_CONF_FILE]    PG configuration file.           [Default: $PG_CONF_FILE]
-    -E  [ENV_FILE]        Connection and TPCC environment  [Default: none]
-  -I                    Run initdb                       [Default: not set]
-  -i  [ITERATIONS]      Number of iterations             [Default: $ITERATIONS]
-  -l  [PRELOAD_LIBRARY] Shared preload library           [Default: none]
-  -n  [BENCHMARK_NAME]  Benchmark name                   [Default: $BENCHMARK_NAME]
-  -O                    Build schema once only           [Default: not set]
-                        Runs maintenance script.
-  -P                    Prepare only: build schema and   [Default: not set]
-                        exit without running benchmarks.
-  -r  [PG_INIT_SQL]     SQL script to run after initdb   [Default: none]
-    -S                    New schema every iteration       [Default: not set]
-  -Z                    Remove data directory            [Default: not set]
-
+Default action: run. Configuration selectors may also be supplied through
+CONNECTION_ENV_FILE, BENCHMARK_ENV_FILE, and RUN_ENV_FILE.
+Without selectors, private connection.env, BENCHMARK/BENCHMARK.env, and run.env
+are required in this checkout. Copy the matching *.env.sample templates first.
+Files ending in .sample (including symlink targets) are never accepted.
+For setup, copy hosts.txt.sample to hosts.txt and edit it, or select --host.
+Run --setup-control-machine once to install missing control-machine tools.
+It does not configure runner VMs or install benchmark/database software.
+Ansible options go after --, for example: --setup -- --check
+The Ansible command is printed before execution. Keep secrets in private
+variable files, not inline arguments; use -e @FILE after --.
+Use dedicated runners: provisioning upgrades packages and stops PostgreSQL.
+See README.md for examples.
 EOF
-
-    if [[ $errorCode -ne 0 ]];
-    then
-        exit_script $errorCode
-    fi
-}
-
-# Perform any required cleanup and exit with the given error/success code
-exit_script()
-{
-    # Exit with a given return code or 0 if none are provided.
-    exit ${1:-0}
 }
 
 usage_error()
 {
-    echo "ERROR: $*" >&2
-    echo "Run '$0 --help' for usage." >&2
-    exit_script 2
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 2
 }
 
-validate_integer_setting()
-{
-    local setting_name="$1"
-    local setting_value="$2"
-    local minimum_value="$3"
+BENCHMARK_TYPE=""
+RUN_ACTION=run
 
-    if [[ ! "$setting_value" =~ ^[0-9]+$ ]] ||
-        (( 10#$setting_value < minimum_value )); then
-        echo "SANITY CHECK FAILED: $setting_name must be an integer" \
-            ">= $minimum_value (got '$setting_value')" >&2
-        return 1
-    fi
-}
+# CLI file selectors override these environment-provided defaults.
+connection_file="${CONNECTION_ENV_FILE:-}"
+benchmark_file="${BENCHMARK_ENV_FILE:-}"
+run_file="${RUN_ENV_FILE:-}"
+action_set=false
+config_selected=false
+setup_host=""
+ansible_options=()
 
-# Sanity check environment before running benchmarks
-sanity_check()
-{
-    local errors=0
-
-    validate_integer_setting "ITERATIONS" "$ITERATIONS" 1 \
-        || errors=$((errors + 1))
-    validate_integer_setting "PGPORT" "$PGPORT" 1 || errors=$((errors + 1))
-    validate_integer_setting "PG_COUNT_WARE" "$PG_COUNT_WARE" 0 \
-        || errors=$((errors + 1))
-    validate_integer_setting "PG_FIRST_WARE" "$PG_FIRST_WARE" 1 \
-        || errors=$((errors + 1))
-    validate_integer_setting "PG_NUM_VU" "$PG_NUM_VU" 1 \
-        || errors=$((errors + 1))
-    validate_integer_setting "PG_VU" "$PG_VU" 1 || errors=$((errors + 1))
-    validate_integer_setting "PG_DURATION" "$PG_DURATION" 1 \
-        || errors=$((errors + 1))
-    validate_integer_setting "PG_RAMPUP" "$PG_RAMPUP" 0 \
-        || errors=$((errors + 1))
-
-    if [[ "$PGPORT" =~ ^[0-9]+$ ]] && (( 10#$PGPORT > 65535 )); then
-        echo "SANITY CHECK FAILED: PGPORT must be <= 65535 (got '$PGPORT')" >&2
-        errors=$((errors + 1))
-    fi
-
-    if [[ $errors -gt 0 ]]; then
-        echo "Sanity check failed with $errors error(s). Aborting." >&2
-        exit_script 1
-    fi
-
-    # PG_NUM_VU (schema build VUs) cannot exceed the warehouse count when
-    # warehouses are being built. PG_COUNT_WARE=0 is the multi-runner sentinel
-    # for prepare-only DDL phases, where single-threaded behavior is expected.
-    if [[ "$PG_COUNT_WARE" -gt 0 && "$PG_NUM_VU" -gt "$PG_COUNT_WARE" ]]; then
-        echo "SANITY CHECK FAILED: PG_NUM_VU ($PG_NUM_VU) cannot exceed" \
-            "PG_COUNT_WARE ($PG_COUNT_WARE)" >&2
-        errors=$((errors + 1))
-    elif [[ "$PG_COUNT_WARE" -eq 0 && -z "$PREPARE_ONLY" ]]; then
-        echo "SANITY CHECK FAILED: PG_COUNT_WARE is 0 outside prepare-only mode" >&2
-        errors=$((errors + 1))
-    fi
-
-    # Check ulimit -n (open files) is more than 5x PG_NUM_VU and 5x PG_VU
-    local open_files
-    open_files=$(ulimit -n)
-    if [[ "$open_files" != "unlimited" ]]; then
-        local min_for_num_vu=$((PG_NUM_VU * 5))
-        local min_for_vu=$((PG_VU * 5))
-
-        if [[ "$open_files" -le "$min_for_num_vu" ]]; then
-            echo "SANITY CHECK FAILED: ulimit -n ($open_files) must be more than 5x PG_NUM_VU ($PG_NUM_VU), i.e. > $min_for_num_vu" >&2
-            errors=$((errors + 1))
-        fi
-
-        if [[ "$open_files" -le "$min_for_vu" ]]; then
-            echo "SANITY CHECK FAILED: ulimit -n ($open_files) must be more than 5x PG_VU ($PG_VU), i.e. > $min_for_vu" >&2
-            errors=$((errors + 1))
-        fi
-    fi
-
-    # Check ulimit -u (max user processes) is large enough
-    local max_procs
-    max_procs=$(ulimit -u)
-    local min_procs=4096
-    if [[ "$max_procs" != "unlimited" && "$max_procs" -lt "$min_procs" ]]; then
-        echo "SANITY CHECK FAILED: ulimit -u ($max_procs) is too low; should be at least $min_procs or unlimited" >&2
-        errors=$((errors + 1))
-    fi
-
-    if [[ $errors -gt 0 ]]; then
-        echo "Sanity check failed with $errors error(s). Aborting." >&2
-        exit_script 1
-    fi
-
-    echo "Sanity check passed."
-}
-
-# Validate arguments to ensure that we can safely run the benchmark
-validate_args()
-{
-    if [[ ! -f "$PG_CONF_FILE" ]];
-	then
-        usage_error "PostgreSQL configuration file not found: $PG_CONF_FILE"
-    fi
-
-    if [[ -n "$ENV_FILE" && ! -f "$ENV_FILE" ]];
-    then
-        usage_error "Environment file not found: $ENV_FILE"
-    fi
-
-    if [[ -z "$PG_CONFIG" || ! -x "$PG_CONFIG" ]];
-    then
-        usage_error "-C must point to an executable pg_config"
-    fi
-
-    if [[ -z "$HAMMERDB_INSTALL_DIR" ||
-          ! -x "$HAMMERDB_INSTALL_DIR/hammerdbcli" ]];
-    then
-        usage_error "-H must point to a HammerDB directory containing" \
-            "executable hammerdbcli"
-    fi
-
-    if [[ -z "$WORK_DIR" ]];
-    then
-        usage_error "-t working directory is required"
-    fi
-
-    if ! mkdir -p "$WORK_DIR";
-    then
-        usage_error "Unable to create working directory: $WORK_DIR"
-    fi
-}
-
-# Clean up existing benchmark data (only when not running initdb)
-postgresql_cleanup()
-{
-	local iteration="$1"
-	local btype="$2"
-
-	echo "INITDB not set. Running cleanup script before iteration $iteration..."
-	cleanup_log="$WORK_DIR/$BENCHMARK_NAME.cleanup.$btype.$iteration.log"
-
-	cleanup_sql="$SCRIPT_DIR/$BENCHMARK_TYPE/${BENCHMARK_TYPE}_cleanup"
-	if [[ ! -z "$CITUS_COMPAT_MODE" ]]; then
-		cleanup_sql="${cleanup_sql}_citus"
-	fi
-	cleanup_sql="${cleanup_sql}.sql"
-
-	psql -v ON_ERROR_STOP=1 -f "$cleanup_sql" 2>&1 | tee "$cleanup_log"
-	if [[ $? -ne 0 ]]; then
-		echo "Cleanup script failed. See log file [$cleanup_log] for details." >&2
-		exit_script 1
-	fi
-}
-
-# Run maintenance script between iterations (used with -O)
-postgresql_maintenance()
-{
-	local iteration="$1"
-	local btype="$2"
-    local sleep_duration=60
-
-	echo "Running maintenance script before iteration $iteration..."
-    echo "Sleeping for $sleep_duration seconds to allow the system to stabilize before running maintenance tasks..."
-    sleep $sleep_duration
-
-	maintenance_log="$WORK_DIR/$BENCHMARK_NAME.maintenance.$btype.$iteration.log"
-
-	maintenance_sql="$SCRIPT_DIR/$BENCHMARK_TYPE/${BENCHMARK_TYPE}_maintenance"
-	if [[ ! -z "$CITUS_COMPAT_MODE" ]]; then
-		maintenance_sql="${maintenance_sql}_citus"
-	fi
-	maintenance_sql="${maintenance_sql}.sql"
-
-	psql -v ON_ERROR_STOP=1 -f "$maintenance_sql" 2>&1 | tee "$maintenance_log"
-	if [[ $? -ne 0 ]]; then
-		echo "Maintenance script failed. See log file [$maintenance_log] for details." >&2
-		exit_script 1
-	fi
-
-    echo "Sleeping for $sleep_duration seconds to allow the system to stabilize after running maintenance tasks..."
-    sleep $sleep_duration
-}
-
-# Prepare only: build schema and exit without running benchmarks
-prepare_only()
-{
-	local benchmark_type="$1"
-	local data_pg_logs_dir="$WORK_DIR/$benchmark_type/prepare"
-	local script_logfile="$WORK_DIR/$BENCHMARK_NAME.$benchmark_type.prepare.log"
-
-	mkdir -p $data_pg_logs_dir
-
-	echo
-	echo "================================================================================"
-	echo "[$BENCHMARK_NAME: $benchmark_type] Prepare only - building schema"
-	echo "================================================================================"
-	echo
-
-	INITDB_FLAG=""
-	if [[ ! -z "$INITDB" ]]; then
-		INITDB_FLAG="-i"
-	fi
-
-	REMOVE_DIR_FLAG=""
-	if [[ ! -z "$REMOVE_DATA_DIR" ]]; then
-		REMOVE_DIR_FLAG="-z"
-	fi
-
-	CITUS_FLAG=""
-	if [[ ! -z "$CITUS_COMPAT_MODE" ]]; then
-		CITUS_FLAG="-c"
-	fi
-
-	if [[ ! -z "$PG_INIT_SQL" ]]; then
-		$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG -S -P $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR -r "$PG_INIT_SQL" 2>&1 | tee $script_logfile
-	else
-		$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG -S -P $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR 2>&1 | tee $script_logfile
-	fi
-
-	if [[ $? -ne 0 ]]; then
-		echo "Prepare failed. See log file [$script_logfile] for details." >&2
-		exit_script 1
-	fi
-
-	echo
-	echo "Schema prepared successfully. Exiting without running benchmarks."
-	exit_script 0
-}
-
-# Benchmarking loop
-run_loop()
-{
-	retval=0
-	benchmark_type="$1"
-	script_logfile=""
-	data_pg_logs_dir=""
-	summary_file="$WORK_DIR/$BENCHMARK_NAME.summary.$benchmark_type.log"
-
-	# Empty file
-	: > $summary_file 2>/dev/null
-
-	# Run the loop
-	for (( i=1; i <= $ITERATIONS; i++ ))
-	do
-		echo
-		echo "================================================================================"
-		echo "[$BENCHMARK_NAME: $benchmark_type] Iteration $i of $ITERATIONS"
-		echo "================================================================================"
-		echo
-
-		# If we are not running initdb, run cleanup or maintenance before each iteration
-		if [[ -z "$INITDB" ]]; then
-			if [[ ! -z "$BUILD_SCHEMA_ONCE" ]]; then
-				# Build once: cleanup before first iteration, maintenance for the rest
-				if [[ $i -eq 1 ]]; then
-					postgresql_cleanup "$i" "$benchmark_type"
-				else
-					postgresql_maintenance "$i" "$benchmark_type"
-				fi
-			elif [[ -z "$BUILD_SCHEMA" ]]; then
-				# No schema build: run maintenance
-				postgresql_maintenance "$i" "$benchmark_type"
-			else
-				# Schema rebuilt every iteration: run cleanup
-				postgresql_cleanup "$i" "$benchmark_type"
-			fi
-		fi
-
-		# Set data and log directory for current iteration
-		data_pg_logs_dir="$WORK_DIR/$benchmark_type/$i"
-		mkdir -p $data_pg_logs_dir
-
-		# Script file for capturing benchmarking script output
-		script_logfile=$WORK_DIR/$BENCHMARK_NAME.$benchmark_type.$i.log
-
-		# Run benchmark with initdb, build schema, remove data directory options
-		INITDB_FLAG=""
-		if [[ ! -z "$INITDB" ]]; then
-			INITDB_FLAG="-i"
-		fi
-
-		REMOVE_DIR_FLAG=""
-		if [[ ! -z "$REMOVE_DATA_DIR" ]]; then
-			REMOVE_DIR_FLAG="-z"
-		fi
-
-		CITUS_FLAG=""
-		if [[ ! -z "$CITUS_COMPAT_MODE" ]]; then
-			CITUS_FLAG="-c"
-		fi
-
-		# Only pass build schema on the first iteration when -O (build once) is set
-		SCHEMA_FLAG="$BUILD_SCHEMA"
-		if [[ ! -z "$BUILD_SCHEMA_ONCE" && $i -gt 1 ]]; then
-			SCHEMA_FLAG=""
-		fi
-
-		if [[ ! -z "$PG_INIT_SQL" ]]; then
-			$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG $SCHEMA_FLAG $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR -r "$PG_INIT_SQL" 2>&1 | tee $script_logfile
-		else
-			$SCRIPT_DIR/$BENCHMARK_SCRIPT $INITDB_FLAG $SCHEMA_FLAG $REMOVE_DIR_FLAG $CITUS_FLAG -C $PG_CONFIG -t $data_pg_logs_dir -x $HAMMERDB_INSTALL_DIR 2>&1 | tee $script_logfile
-		fi
-		retval="$?"
-
-		if [[ $retval -ne 0 ]];
-		then
-			echo "Aborting due to error." >&2
-			exit 1
-		fi
-
-		# Capture the results in a summary file for easier access
-		grep "TEST RESULT :" $script_logfile >> $summary_file
-	done
-}
-
-# Use pg_config and get PG version
-get_pg_version()
-{
-    PG_VERSION=$("$PG_CONFIG" --version | cut -d' ' -f2)
-
-    echo "PostgreSQL Version [$PG_VERSION]"
-}
-
-# Run Benchmark
-run_benchmark()
-{
-    export PG_INITDB_OPTS="$PG_INITDB_OPTS_BASE"
-    benchmark_type="PG-$PG_VERSION"
-
-	if [[ ! -z "$PRELOAD_LIBRARY" ]];
-	then
-        export PG_INITDB_OPTS="$PG_INITDB_OPTS -c shared_preload_libraries='"$PRELOAD_LIBRARY"'"
-        benchmark_type="$benchmark_type-$PRELOAD_LIBRARY"
-	fi
-
-	run_loop "$benchmark_type"
-}
-
-# Normalize the two long options before parsing the existing short options.
-normalized_args=()
-for argument in "$@"; do
-    case "$argument" in
-        --check)
-            CHECK_ONLY="true"
+while (($#)); do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --setup-control-machine|--setup|--check|--prepare|--cleanup)
+            [[ "$action_set" == false ]] || usage_error "Choose only one action"
+            RUN_ACTION="${1#--}"
+            action_set=true
+            shift
             ;;
-        --help)
-            normalized_args+=("-h")
+        --host)
+            [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || usage_error "--host requires a VM name"
+            [[ -z "$setup_host" ]] || usage_error "Choose only one VM with --host"
+            setup_host="$2"
+            shift 2
             ;;
+        --connection-env|--benchmark-env|--run-env)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] ||
+            {
+                usage_error "$1 requires a filename"
+            }
+
+            case "$1" in
+                --connection-env) connection_file="$2" ;;
+                --benchmark-env) benchmark_file="$2" ;;
+                --run-env) run_file="$2" ;;
+            esac
+            config_selected=true
+            shift 2
+            ;;
+        --)
+            [[ "$RUN_ACTION" == setup ]] || usage_error "Ansible options after -- require --setup"
+            shift
+            ansible_options=("$@")
+            break
+            ;;
+        -*) usage_error "Unknown option '$1' (see --help)" ;;
         *)
-            normalized_args+=("$argument")
-            ;;
-    esac
-done
-set -- "${normalized_args[@]}"
-
-# Check options passed in.
-while getopts "hb:cC:e:E:H:Ii:l:n:OPr:SZt:" OPTION
-do
-    case $OPTION in
-        h)
-            usage
-            exit_script 0
-            ;;
-
-        b)
-            BENCHMARK_TYPE=$OPTARG
-            ;;
-
-        c)
-            CITUS_COMPAT_MODE="true"
-            ;;
-
-        C)
-            PG_CONFIG=$OPTARG
-            ;;
-
-        e)
-            PG_CONF_FILE=$OPTARG
-            ;;
-
-        E)
-            ENV_FILE=$OPTARG
-            ;;
-
-        H)
-            HAMMERDB_INSTALL_DIR=$OPTARG
-            ;;
-
-        I)
-            INITDB="true"
-            ;;
-
-        i)
-            ITERATIONS=$OPTARG
-            ;;
-
-        l)
-            PRELOAD_LIBRARY=$OPTARG
-            ;;
-
-        n)
-            BENCHMARK_NAME=$OPTARG
-            ;;
-
-        O)
-            BUILD_SCHEMA="-S"
-            BUILD_SCHEMA_ONCE="true"
-            ;;
-
-        P)
-            PREPARE_ONLY="true"
-            ;;
-
-        r)
-            PG_INIT_SQL=$OPTARG
-            ;;
-
-        S)
-            BUILD_SCHEMA="-S"
-            ;;
-
-        Z)
-            REMOVE_DATA_DIR="true"
-            ;;
-
-        t)
-            WORK_DIR=$OPTARG
-            ;;
-
-        ?)
-            usage 2
+            [[ -z "$BENCHMARK_TYPE" ]] || usage_error "Unexpected argument: $1"
+            BENCHMARK_TYPE="$1"
+            shift
             ;;
     esac
 done
 
-# Validate and update setup
-validate_args
+if [[ "$RUN_ACTION" == setup-control-machine ]]
+then
+    [[ -z "$BENCHMARK_TYPE" && -z "$setup_host" && "$config_selected" == false ]] ||
+    {
+        usage_error "--setup-control-machine takes no benchmark, host, or environment selectors"
+    }
 
-# Source the environment file(s)
-BENCHMARK_ENV_FILE="$SCRIPT_DIR/$BENCHMARK_TYPE/${BENCHMARK_TYPE}.env"
-if [[ ! -f "$BENCHMARK_ENV_FILE" ]]; then
-    usage_error "Unsupported benchmark type or missing defaults:" \
-        "$BENCHMARK_TYPE"
-fi
-if [[ -n "$ENV_FILE" ]]; then
-    source "$ENV_FILE"
-fi
-source "$BENCHMARK_ENV_FILE"
-source "$PG_CONF_FILE"
+    control_setup="$FRAMEWORK_ROOT/setup/setup_control_machine.sh"
+    [[ -f "$control_setup" && -r "$control_setup" ]] ||
+    {
+        fail "Control-machine setup script must be a readable regular file: $control_setup"
+        exit 1
+    }
 
-# Run sanity checks before proceeding
-sanity_check
-
-# Get the PG version
-get_pg_version
-
-if [[ -n "$CHECK_ONLY" ]]; then
-    echo
-    echo "Configuration check passed."
-    echo "  PostgreSQL: $PG_VERSION ($PG_CONFIG)"
-    echo "  HammerDB:   $HAMMERDB_INSTALL_DIR"
-    echo "  Target:     $PG_USER@$PGHOST:$PGPORT/$PG_DBASE"
-    echo "  Work dir:   $WORK_DIR"
-    echo "  TPCC:       $PG_COUNT_WARE warehouses," \
-        "$PG_NUM_VU build VUs, $PG_VU run VUs"
-    exit_script 0
+    exec bash "$control_setup"
 fi
 
-# If prepare-only mode, build schema and exit
-if [[ ! -z "$PREPARE_ONLY" ]]; then
-    benchmark_type="PG-$PG_VERSION"
-    if [[ ! -z "$PRELOAD_LIBRARY" ]]; then
-        export PG_INITDB_OPTS="$PG_INITDB_OPTS_BASE -c shared_preload_libraries='"$PRELOAD_LIBRARY"'"
-        benchmark_type="$benchmark_type-$PRELOAD_LIBRARY"
+if [[ "$RUN_ACTION" == setup ]]
+then
+    [[ -z "$BENCHMARK_TYPE" ]] || usage_error "--setup does not take a benchmark name; use --host for a single VM"
+    [[ "$config_selected" == false ]] || usage_error "--setup uses Ansible variables, not benchmark environment selectors"
+    require_command ansible-playbook ||
+    {
+        printf 'Run %q --setup-control-machine to install local provisioning tools first.\n' "$FRAMEWORK_ROOT/wrapper.sh" >&2
+        exit 1
+    }
+
+    playbook="$FRAMEWORK_ROOT/setup/ansible/runner_setup.yml"
+    [[ -f "$playbook" && -r "$playbook" ]] || { fail "Ansible playbook must be a readable regular file: $playbook"; exit 1; }
+
+    if [[ -n "$setup_host" ]]
+    then
+        validate_runner_host "$setup_host"
+        inventory="$setup_host,"
+    else
+        inventory="$FRAMEWORK_ROOT/hosts.txt"
+        read_runner_hosts "$inventory"
     fi
-    prepare_only "$benchmark_type"
+
+    ansible_command=(ansible-playbook -i "$inventory" "$playbook" "${ansible_options[@]}")
+    # Print reusable shell quoting, but execute the argument array directly.
+    printf 'Ansible command (run from %q):\n' "$PWD"
+    printf '%q' "${ansible_command[0]}"
+    printf ' %q' "${ansible_command[@]:1}"
+    printf '\n'
+    exec "${ansible_command[@]}"
 fi
 
-# Run benchmarks
-run_benchmark
+[[ -z "$setup_host" ]] || usage_error "--host is only valid with --setup"
+[[ -n "$BENCHMARK_TYPE" ]] || { usage >&2; exit 2; }
 
-# We're done...
-echo
-echo "Benchmarking completed!"
+readonly BENCHMARK_TYPE RUN_ACTION
+export BENCHMARK_TYPE RUN_ACTION
 
-# Print summary results
-echo
-echo "RESULT SUMMARY"
-echo "============================="
-ls $WORK_DIR/$BENCHMARK_NAME.summary.*.log | xargs -I{} echo "echo {}; cat {}" | sh
+trap 'printf "ERROR: Configuration or runner failed at line %s (exit %s)\n" "$LINENO" "$?" >&2' ERR
+# Resolve configuration once; adapters receive the exported settings.
 
-# Perform clean up and exit.
-exit_script 0
+load_configuration "$FRAMEWORK_ROOT" "$BENCHMARK_TYPE" "$connection_file" "$benchmark_file" "$run_file"
+
+BENCHMARK_MODULE="$FRAMEWORK_ROOT/$BENCHMARK_TYPE/$BENCHMARK_TYPE.sh"
+readonly BENCHMARK_MODULE
+
+source "$FRAMEWORK_ROOT/lib/postgresql.sh"
+source "$FRAMEWORK_ROOT/lib/runner.sh"
+source "$BENCHMARK_MODULE"
+
+# Keep preflight offline; target changes start only in runner_main.
+runner_validate
+postgresql_validate
+benchmark_validate
+
+if [[ "$RUN_ACTION" == check ]];
+then
+    printf 'Configuration check passed.\nBenchmark: %s\nTarget: %s@%s:%s/%s\n' \
+        "$BENCHMARK_TYPE" "$PGUSER" "$PGHOST" "$PGPORT" "$PGDATABASE"
+    printf 'Run: %s iteration(s), prepare=%s, output=%s\n' \
+        "$RUN_ITERATIONS" "$RUN_PREPARE_MODE" "$RUN_OUTPUT_ROOT"
+
+    benchmark_describe
+    exit 0
+fi
+
+runner_main

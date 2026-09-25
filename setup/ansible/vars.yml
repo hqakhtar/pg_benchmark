@@ -5,6 +5,10 @@
 pg_version: "17"
 
 # ── Remote user ───────────────────────────────────────────────────────────────
+# SSH defaults for provisioning; override in vars.local.yml if needed.
+ansible_user: azureuser
+ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new"
+
 # Home directory on the runner VMs (tasks that write dotfiles use this).
 runner_user: "{{ ansible_user }}"
 runner_home: "/home/{{ runner_user }}"
@@ -19,18 +23,22 @@ pg_benchmark_dest: "{{ runner_home }}/pg_benchmark"
 # folder exactly. Set false to only add/update files without removing extras.
 update_pg_benchmark: true
 
-# Set true after creating myenv.sh from myenv.sh.sample in the repository root.
-update_myenv: false
-myenv_local_path: "{{ playbook_dir }}/../../myenv.sh"
-myenv_remote_path: "{{ pg_benchmark_dest }}/myenv.sh"
+# Private configuration is excluded from repository synchronization.
+update_benchmark_config: false
+benchmark_config_local_dir: "{{ playbook_dir }}/../.."
+benchmark_config_files:
+  - connection.env
+  - hammerdb/hammerdb.env
+  - run.env
 
-# ── HammerDB tarball (optional) ───────────────────────────────────────────────
-# Set install_hammerdb: true and place the built tarball at the path below to
-# have Ansible copy and extract it on every runner.
-# Leave install_hammerdb: false to skip.
-install_hammerdb: false
-# HammerDB version drives both the tarball name and the extracted directory
-# name, so they can never drift out of sync.
+# ── HammerDB tarball ─────────────────────────────────────────────────────────
+# Install when the requested version is absent. A complete existing installation
+# is left untouched and needs no local archive. Set false to skip installation.
+install_hammerdb: true
+# Only this explicit opt-in allows an existing installation to be replaced.
+reinstall_hammerdb: false
+# Match this to the archive's top-level directory. A custom tarball path does
+# not infer the version; mismatched contents fail preflight when installing.
 hammerdb_version: "5.0"
 hammerdb_dir_name: "HammerDB-{{ hammerdb_version }}"
 hammerdb_archive_name: "{{ hammerdb_dir_name }}-Prod-Linux.tar.gz"

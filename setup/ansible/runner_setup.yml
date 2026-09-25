@@ -2,30 +2,217 @@
 # Runner VM setup playbook.
 # Mirrors setup_runner_ubuntu.sh declaratively.
 #
-# Usage:
-#   cp inventory.ini inventory.local.ini
-#   ansible-playbook -i inventory.local.ini runner_setup.yml
+# Usage (from setup/ansible, with the shared plain-text hosts file):
+#   ansible-playbook -i ../../hosts.txt runner_setup.yml
 #
 # Dry-run (no changes made):
-#   ansible-playbook -i inventory.ini runner_setup.yml --check
+#   ansible-playbook -i ../../hosts.txt runner_setup.yml --check
 #
 # Limit to a single host:
-#   ansible-playbook -i inventory.ini runner_setup.yml --limit citus-runner-m1
+#   ansible-playbook -i ../../hosts.txt runner_setup.yml --limit citus-runner-m1
 #
 # Override a variable at run time:
-#   ansible-playbook -i inventory.ini runner_setup.yml -e pg_version=16
+#   ansible-playbook -i ../../hosts.txt runner_setup.yml -e pg_version=16
 #
 # Update only pg_benchmark repo (git pull behavior):
-#   ansible-playbook -i inventory.ini runner_setup.yml --tags pg_benchmark_update -e update_pg_benchmark=true
+#   ansible-playbook -i ../../hosts.txt runner_setup.yml --tags pg_benchmark_update -e update_pg_benchmark=true
 #
-# Update only myenv.sh on all runners:
-#   ansible-playbook -i inventory.ini runner_setup.yml --tags myenv -e update_myenv=true
+# Update only private benchmark configuration on all runners:
+#   ansible-playbook -i ../../hosts.txt runner_setup.yml --tags benchmark_config -e update_benchmark_config=true
 
 - name: Configure HammerDB benchmark runners
-  hosts: runners
+  hosts: all
   become: true          # sudo for system-level tasks
+  # Every selected host must pass preflight before any host starts provisioning.
+  strategy: linear
+  any_errors_fatal: true
   vars_files:
     - vars.yml
+
+  pre_tasks:
+
+    - name: Preflight HammerDB on every selected runner
+      when: install_hammerdb | bool
+      tags:
+        - hammerdb
+      block:
+        - name: Validate safe HammerDB installation target
+          assert:
+            that:
+              - hammerdb_version is string
+              - hammerdb_version is match('^[0-9][A-Za-z0-9._+-]*$')
+              - hammerdb_dir_name == 'HammerDB-' ~ hammerdb_version
+              - hammerdb_dest is string
+              - hammerdb_dest is match('^/([^/]+/)*[^/]+$')
+              - hammerdb_dest is not regex('(^|/)[.][.]?(/|$)')
+            fail_msg: >-
+              Unsafe HammerDB installation target. Use an absolute, non-root
+              hammerdb_dest without trailing slashes or . / .. path components,
+              and hammerdb_dir_name=HammerDB-<version> with a simple version
+              beginning with a digit.
+
+        - name: Inspect existing HammerDB installation
+          become_user: "{{ runner_user }}"
+          stat:
+            path: "{{ hammerdb_dest }}/{{ hammerdb_dir_name }}"
+            follow: false
+            get_checksum: false
+            get_mime: false
+          register: hammerdb_installation
+
+        - name: Inspect existing HammerDB launcher
+          become_user: "{{ runner_user }}"
+          stat:
+            path: "{{ hammerdb_dest }}/{{ hammerdb_dir_name }}/hammerdbcli"
+            follow: false
+            get_checksum: false
+            get_mime: false
+          register: hammerdb_launcher
+          when: hammerdb_installation.stat.isdir | default(false)
+
+        - name: Protect incomplete HammerDB installations
+          assert:
+            that:
+              - >-
+                not hammerdb_installation.stat.exists
+                or reinstall_hammerdb | bool
+                or (
+                  hammerdb_installation.stat.isdir | default(false)
+                  and hammerdb_launcher.stat.isreg | default(false)
+                  and hammerdb_launcher.stat.readable | default(false)
+                  and hammerdb_launcher.stat.executable | default(false)
+                  and hammerdb_launcher.stat.size | default(0) > 0
+                )
+            fail_msg: >-
+              Existing HammerDB installation at
+              {{ hammerdb_dest }}/{{ hammerdb_dir_name }} is incomplete.
+              Expected a real directory with a readable, nonempty, executable
+              regular hammerdbcli file. To replace it explicitly, provide a valid
+              archive and set -e reinstall_hammerdb=true.
+
+        - name: Determine whether this runner needs a HammerDB archive
+          set_fact:
+            hammerdb_needs_install: >-
+              {{ reinstall_hammerdb | bool or not hammerdb_installation.stat.exists }}
+
+        - name: Resolve required HammerDB archive on the controller
+          set_fact:
+            hammerdb_archive_path: >-
+              {{ [playbook_dir, local_hammerdb_tarball | expanduser] | path_join }}
+          when: hammerdb_needs_install | bool
+
+        - name: Check required local HammerDB tarball
+          become: false
+          delegate_to: localhost
+          stat:
+            path: "{{ hammerdb_archive_path }}"
+            follow: false
+            get_checksum: false
+            get_mime: false
+          register: local_hammerdb_archive
+          when: hammerdb_needs_install | bool
+
+        - name: Require a readable regular HammerDB tarball
+          assert:
+            that:
+              - local_hammerdb_archive.stat.isreg | default(false)
+              - local_hammerdb_archive.stat.readable | default(false)
+            fail_msg: >-
+              A readable regular HammerDB archive is required at
+              {{ hammerdb_archive_path }} (symlinks are not accepted).
+              Provide the requested archive or set -e install_hammerdb=false.
+              Existing installations have not been changed.
+          when: hammerdb_needs_install | bool
+
+        - name: Validate HammerDB archive integrity and layout
+          become: false
+          delegate_to: localhost
+          command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - -c
+              - |
+                import gzip
+                import posixpath
+                import sys
+                import tarfile
+
+                path, root = sys.argv[1:]
+                try:
+                    # Consume the gzip trailer too, so CRC/truncation errors fail preflight.
+                    with gzip.open(path, "rb") as stream:
+                        while stream.read(1024 * 1024):
+                            pass
+                    with tarfile.open(path, "r:gz") as archive:
+                        launcher_found = False
+                        members = {}
+                        for member in archive.getmembers():
+                            name = posixpath.normpath(member.name)
+                            if (
+                                member.name.startswith("/")
+                                or ".." in member.name.split("/")
+                                or not (name == root or name.startswith(root + "/"))
+                                or name in members
+                            ):
+                                raise ValueError("unexpected or duplicate member: " + repr(member.name))
+                            members[name] = member
+                            if not (member.isdir() or member.isfile() or member.issym() or member.islnk()):
+                                raise ValueError("unsupported member: " + repr(name))
+                            if name == root and not member.isdir():
+                                raise ValueError("installation root must be a directory")
+                            if name == root + "/hammerdbcli":
+                                if not (
+                                    member.isfile() and member.size > 0
+                                    and member.mode & 0o444 and member.mode & 0o111
+                                ):
+                                    raise ValueError("hammerdbcli must be readable, nonempty, regular and executable")
+                                launcher_found = True
+                        if not launcher_found:
+                            raise ValueError("missing expected launcher: " + root + "/hammerdbcli")
+                        for name, member in members.items():
+                            paths = [name]
+                            if member.issym() or member.islnk():
+                                target = (
+                                    posixpath.join(posixpath.dirname(name), member.linkname)
+                                    if member.issym() else member.linkname
+                                )
+                                normalized = posixpath.normpath(target)
+                                if not (normalized == root or normalized.startswith(root + "/")):
+                                    raise ValueError("link escapes installation: " + repr(name))
+                                if member.islnk() and not (
+                                    normalized in members and members[normalized].isfile()
+                                ):
+                                    raise ValueError("hard link must target a regular archive member: " + repr(name))
+                                paths.append(target)
+                            for entry_path in paths:
+                                parent = ""
+                                for part in entry_path.split("/")[:-1]:
+                                    parent = posixpath.normpath(posixpath.join(parent, part))
+                                    if parent in members and not members[parent].isdir():
+                                        raise ValueError("non-directory archive parent: " + repr(parent))
+                except (OSError, EOFError, tarfile.TarError, ValueError) as error:
+                    sys.exit("Invalid HammerDB archive " + path + ": " + str(error))
+              - "{{ hammerdb_archive_path }}"
+              - "{{ hammerdb_dir_name }}"
+          changed_when: false
+          check_mode: false
+          when: hammerdb_needs_install | bool
+
+        - name: Keep complete existing HammerDB installation unchanged
+          debug:
+            msg: >-
+              Keeping {{ hammerdb_dest }}/{{ hammerdb_dir_name }} unchanged;
+              no local HammerDB archive is required.
+          when: not hammerdb_needs_install | bool
+
+        - name: Report HammerDB check-mode plan
+          debug:
+            msg: >-
+              HammerDB prerequisites validated; check mode will not remove or
+              install {{ hammerdb_dest }}/{{ hammerdb_dir_name }}.
+          when:
+            - ansible_check_mode
+            - hammerdb_needs_install | bool
 
   tasks:
 
@@ -44,6 +231,7 @@
           - ca-certificates
           - gnupg
           - lsb-release
+          - rsync
         state: present
 
     # ── PostgreSQL PGDG repository ─────────────────────────────────────────────
@@ -141,94 +329,111 @@
         recursive: true
         rsync_opts:
           - "--exclude=.git"
+          - "--exclude=.vscode"
           - "--exclude=logs"
+          - "--exclude=benchmark-results"
+          - "--exclude=/unwanted/"
+          - "--include=*.[eE][nN][vV].[sS][aA][mM][pP][lL][eE]"
+          - "--exclude=*.[eE][nN][vV]"
+          - "--exclude=*.[eE][nN][vV].*"
+          - "--exclude=*.local.ini"
+          - "--exclude=*.local.yml"
+          - "--exclude=myenv*"
+          - "--include=hosts.txt.sample"
+          - "--exclude=hosts.txt*"
+          - "--exclude=*.orig"
+          - "--exclude=*.patch"
       tags:
         - pg_benchmark
         - pg_benchmark_update
 
-    - name: Check local myenv.sh
+    - name: Require private configuration paths rather than sample templates
+      assert:
+        that:
+          - item is string
+          - item | length > 0
+          - item is not regex('(?i)[.]sample$')
+          - item is not match('^/')
+          - item is not regex('(^|/)[.][.](/|$)')
+        fail_msg: >-
+          Select private configuration files relative to benchmark_config_local_dir,
+          not .sample templates, absolute paths, or .. traversal.
+      loop: "{{ benchmark_config_files }}"
+      when: update_benchmark_config | bool
+      tags:
+        - benchmark_config
+
+    - name: Check local benchmark configuration
       become: false
       delegate_to: localhost
       stat:
-        path: "{{ myenv_local_path }}"
-      register: local_myenv
-      when: update_myenv | bool
+        path: "{{ benchmark_config_local_dir }}/{{ item }}"
+        follow: false
+        get_checksum: false
+        get_mime: false
+      loop: "{{ benchmark_config_files }}"
+      register: local_benchmark_config
+      when: update_benchmark_config | bool
       tags:
-        - myenv
+        - benchmark_config
 
-    - name: Require local myenv.sh when upload is enabled
+    - name: Require all selected benchmark configuration files
       fail:
         msg: >-
-          Create {{ myenv_local_path }} from myenv.sh.sample, or set
-          update_myenv=false.
+          Create {{ benchmark_config_local_dir }}/{{ item.item }} from the
+          corresponding *.env.sample template, or set update_benchmark_config=false.
+          Selected files must be regular files, not symlinks.
+      loop: "{{ local_benchmark_config.results | default([]) }}"
       when:
-        - update_myenv | bool
-        - not local_myenv.stat.exists
+        - update_benchmark_config | bool
+        - not item.stat.isreg | default(false)
       tags:
-        - myenv
+        - benchmark_config
 
-    - name: Copy myenv.sh to runners
+    - name: Copy private benchmark configuration to runners
       copy:
-        src: "{{ myenv_local_path }}"
-        dest: "{{ myenv_remote_path }}"
+        src: "{{ benchmark_config_local_dir }}/{{ item }}"
+        dest: "{{ pg_benchmark_dest }}/{{ item }}"
         owner: "{{ runner_user }}"
         group: "{{ runner_user }}"
-        mode: '0644'
-      when: update_myenv | bool
+        mode: '0600'
+      loop: "{{ benchmark_config_files }}"
+      when: update_benchmark_config | bool
+      no_log: true
+      diff: false
       tags:
-        - myenv
+        - benchmark_config
 
-    # ── HammerDB tarball (optional) ────────────────────────────────────────────
-    # Enable by setting install_hammerdb: true in vars.yml or with -e install_hammerdb=true
-    # Run only HammerDB tasks with: --tags hammerdb
+    # ── HammerDB installation ─────────────────────────────────────────────────
 
-    - name: Check local HammerDB tarball
-      become: false
-      delegate_to: localhost
-      stat:
-        path: "{{ local_hammerdb_tarball }}"
-      register: local_hammerdb_archive
-      when: install_hammerdb | bool
-      tags:
-        - hammerdb
-
-    - name: Require local HammerDB tarball when install is enabled
-      fail:
-        msg: >-
-          Place the HammerDB tarball at {{ local_hammerdb_tarball }}, or set
-          install_hammerdb=false.
+    - name: Install HammerDB only when required and not in check mode
       when:
         - install_hammerdb | bool
-        - not local_hammerdb_archive.stat.exists
+        - hammerdb_needs_install | default(false) | bool
+        - not ansible_check_mode
       tags:
         - hammerdb
+      block:
+        - name: Ensure HammerDB parent directory exists
+          file:
+            path: "{{ hammerdb_dest }}"
+            state: directory
+            owner: "{{ runner_user }}"
+            group: "{{ runner_user }}"
+            mode: '0755'
 
-    - name: Replace HammerDB directory when install is enabled
-      file:
-        path: "{{ hammerdb_dest }}/{{ hammerdb_dir_name }}"
-        state: absent
-      when: install_hammerdb | bool
-      tags:
-        - hammerdb
+        - name: Replace HammerDB directory only on explicit reinstall
+          file:
+            path: "{{ hammerdb_dest }}/{{ hammerdb_dir_name }}"
+            state: absent
+          when: reinstall_hammerdb | bool
 
-    - name: Copy and extract HammerDB tarball
-      unarchive:
-        src: "{{ local_hammerdb_tarball }}"   # local path on control machine — Ansible scps it
-        dest: "{{ hammerdb_dest }}"
-        owner: "{{ runner_user }}"
-        group: "{{ runner_user }}"
-        mode: '0755'
-        # remote_src is NOT set — Ansible copies then extracts in one step
-      when: install_hammerdb | bool
-      tags:
-        - hammerdb
-
-    - name: Fix ownership on HammerDB directory
-      file:
-        path: "{{ hammerdb_dest }}/{{ hammerdb_dir_name }}"
-        owner: "{{ runner_user }}"
-        group: "{{ runner_user }}"
-        recurse: true
-      when: install_hammerdb | bool
-      tags:
-        - hammerdb
+        - name: Copy and extract HammerDB tarball
+          # The archive supplies the versioned directory; creates is only a skip guard.
+          unarchive:
+            src: "{{ hammerdb_archive_path }}"   # the same file validated in preflight
+            dest: "{{ hammerdb_dest }}"
+            creates: "{{ hammerdb_dest }}/{{ hammerdb_dir_name }}"
+            owner: "{{ runner_user }}"
+            group: "{{ runner_user }}"
+            mode: '0755'

@@ -2,7 +2,8 @@
 
 # This script builds HammerDB from source and applies necessary patches.
 
-if [ ! -f "hammerdbcli" ]; then
+if [ ! -f "hammerdbcli" ];
+then
     echo "Error: Run this script from within the HammerDB source directory."
     exit 1
 fi
