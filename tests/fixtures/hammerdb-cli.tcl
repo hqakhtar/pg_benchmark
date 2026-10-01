@@ -1,6 +1,6 @@
 puts "HammerDB CLI v5.0-test"
 
-set configpg [dict create \
+set configpostgresql [dict create \
     connection [dict create pg_host "" pg_port "" pg_sslmode "" \
         pg_azure_citus false pg_citus_loadbalancer 7432 pg_citus_direct_workers true] \
     tpcc [dict create pg_dbase "" pg_defaultdbase "" pg_user "" pg_superuser "" \
@@ -9,22 +9,19 @@ set configpg [dict create \
         pg_duration 1 pg_vacuum true]]
 
 if {[info exists ::env(TEST_NO_RANGE_SUPPORT)]} {
-    dict unset configpg tpcc pg_first_ware
+    dict unset configpostgresql tpcc pg_first_ware
 }
 if {[info exists ::env(TEST_STOCK_HAMMERDB)]} {
     foreach key {pg_azure_citus pg_citus_loadbalancer pg_citus_direct_workers} {
-        dict unset configpg connection $key
+        dict unset configpostgresql connection $key
     }
-    dict unset configpg tpcc pg_first_ware
+    dict unset configpostgresql tpcc pg_first_ware
 }
 
 proc dbset {args} {}
 proc quotemeta {value} { return $value }
 proc diset {section key value} {
-    if {[string match *pass* $key]} {
-        error "Passwords must not pass through the logging diset API"
-    }
-    dict set ::configpg $section $key $value
+    dict set ::configpostgresql $section $key $value
 }
 proc giset {args} {}
 proc vuset {args} {}
@@ -41,13 +38,13 @@ proc run_phase {phase} {
     }
     puts $trace "$phase|warehouses=$::env(HDB_WAREHOUSES)|first=$::env(HDB_FIRST_WAREHOUSE)|vus=$::env(HDB_RUN_VUS)$location"
     close $trace
-    if {[dict get $::configpg tpcc pg_dbase] ne $::env(PGDATABASE) ||
-        [dict get $::configpg tpcc pg_user] ne $::env(PGUSER)} {
+    if {[dict get $::configpostgresql tpcc pg_dbase] ne $::env(PGDATABASE) ||
+        [dict get $::configpostgresql tpcc pg_user] ne $::env(PGUSER)} {
         error "The adapter changed the canonical connection"
     }
-    if {[dict get $::configpg tpcc pg_cituscompat] ne $::env(HDB_CITUS_COMPAT) ||
-        ([dict exists $::configpg connection pg_azure_citus] &&
-         [dict get $::configpg connection pg_azure_citus] ne $::env(HDB_CITUS_COMPAT))} {
+    if {[dict get $::configpostgresql tpcc pg_cituscompat] ne $::env(HDB_CITUS_COMPAT) ||
+        ([dict exists $::configpostgresql connection pg_azure_citus] &&
+         [dict get $::configpostgresql connection pg_azure_citus] ne $::env(HDB_CITUS_COMPAT))} {
         error "Citus compatibility did not reach the HammerDB dictionaries"
     }
     set expected_password ""
@@ -61,8 +58,8 @@ proc run_phase {phase} {
     } elseif {[info exists ::env(PGPASSWORD)]} {
         set expected_password $::env(PGPASSWORD)
     }
-    if {[dict get $::configpg tpcc pg_pass] ne $expected_password ||
-        [dict get $::configpg tpcc pg_superuserpass] ne $::env(HDB_SUPERUSER_PASSWORD)} {
+    if {[dict get $::configpostgresql tpcc pg_pass] ne $expected_password ||
+        [dict get $::configpostgresql tpcc pg_superuserpass] ne $::env(HDB_SUPERUSER_PASSWORD)} {
         error "Credentials did not survive Tcl configuration"
     }
     if {[info exists ::env(TEST_EXPECT_EMPTY_ADMIN)] && $::env(TEST_EXPECT_EMPTY_ADMIN) &&

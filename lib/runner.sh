@@ -31,7 +31,7 @@ runner_validate()
         require_command "$command"
     done
     # Check the adapter contract before creating any run output.
-    for hook in benchmark_validate benchmark_prepare benchmark_run benchmark_cleanup benchmark_describe; do
+    for hook in benchmark_prepare benchmark_run benchmark_cleanup benchmark_describe; do
         declare -F "$hook" >/dev/null ||
         {
             fail "Benchmark module does not implement $hook"

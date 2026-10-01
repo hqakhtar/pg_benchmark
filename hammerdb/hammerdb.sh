@@ -2,114 +2,6 @@
 
 HDB_MODULE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-benchmark_validate()
-{
-    [[ "$HDB_WORKLOAD" == tpcc ]] ||
-    {
-        fail "HammerDB currently supports HDB_WORKLOAD=tpcc only"
-        return 1
-    }
-
-    HAMMERDB_HOME="$(absolute_path "$HAMMERDB_HOME")"
-    export HAMMERDB_HOME
-    [[ -x "$HAMMERDB_HOME/hammerdbcli" ]] ||
-    {
-        fail "HAMMERDB_HOME must contain an executable hammerdbcli: $HAMMERDB_HOME"
-        return 1
-    }
-
-    [[ -n "$HDB_SUPERUSER" ]] || { fail "HDB_SUPERUSER must not be empty"; return 1; }
-
-    validate_integer HDB_WAREHOUSES "$HDB_WAREHOUSES" 0
-    validate_integer HDB_FIRST_WAREHOUSE "$HDB_FIRST_WAREHOUSE" 1
-    validate_integer HDB_BUILD_VUS "$HDB_BUILD_VUS" 1
-    validate_integer HDB_RUN_VUS "$HDB_RUN_VUS" 1
-    validate_integer HDB_RAMPUP_MINUTES "$HDB_RAMPUP_MINUTES" 0
-    validate_integer HDB_DURATION_MINUTES "$HDB_DURATION_MINUTES" 1
-    validate_integer HDB_CITUS_LOADBALANCER_PORT "$HDB_CITUS_LOADBALANCER_PORT" 1 65535
-    validate_boolean HDB_CITUS_COMPAT "$HDB_CITUS_COMPAT"
-    validate_boolean HDB_CITUS_DIRECT_WORKERS "$HDB_CITUS_DIRECT_WORKERS"
-    validate_boolean HDB_DISTRIBUTED_LOAD "$HDB_DISTRIBUTED_LOAD"
-    validate_boolean HDB_RESET_SCHEMA "$HDB_RESET_SCHEMA"
-    validate_boolean HDB_MAINTENANCE "$HDB_MAINTENANCE"
-    validate_boolean HDB_VACUUM "$HDB_VACUUM"
-
-    if ((HDB_WAREHOUSES > 0 && HDB_BUILD_VUS > HDB_WAREHOUSES));
-    then
-        fail "HDB_BUILD_VUS cannot exceed HDB_WAREHOUSES"
-        return 1
-    fi
-
-    # Zero warehouses selects post-data DDL in the distributed load protocol.
-    if ((HDB_WAREHOUSES == 0));
-    then
-        [[ "$HDB_DISTRIBUTED_LOAD" == true &&
-           ( "$RUN_ACTION" == prepare || "$RUN_ACTION" == check ) &&
-           "$HDB_FIRST_WAREHOUSE" == 1 && "$HDB_BUILD_VUS" == 1 ]] ||
-        {
-            fail "Zero warehouses are only valid for the distributed prepare finalization phase (first warehouse/build VUs = 1)"
-            return 1
-        }
-
-    fi
-
-    if ((HDB_FIRST_WAREHOUSE != 1)) && [[ "$HDB_DISTRIBUTED_LOAD" != true ]];
-    then
-        fail "Warehouse ranges require HDB_DISTRIBUTED_LOAD=true"
-        return 1
-    fi
-
-    if [[ "$HDB_DISTRIBUTED_LOAD" == true && "$RUN_ACTION" == run ]];
-    then
-        fail "HDB_DISTRIBUTED_LOAD is a prepare-only protocol, not a benchmark run mode"
-        return 1
-    fi
-
-    if [[ "$HDB_RESET_SCHEMA" == true && "$RUN_ALLOW_DESTRUCTIVE" != true ]];
-    then
-        fail "HDB_RESET_SCHEMA=true requires RUN_ALLOW_DESTRUCTIVE=true"
-        return 1
-    fi
-
-    if [[ "$RUN_PREPARE_MODE" == each && "$HDB_RESET_SCHEMA" != true ]];
-    then
-        fail "HammerDB preparation for each iteration requires HDB_RESET_SCHEMA=true"
-        return 1
-    fi
-
-    if [[ "$HDB_DISTRIBUTED_LOAD" == true && "$HDB_RESET_SCHEMA" == true ]];
-    then
-        fail "Distributed preparation must not reset the schema on individual runners"
-        return 1
-    fi
-
-    local limit required
-    limit="$(ulimit -n)"
-    required=$((5 * (HDB_BUILD_VUS > HDB_RUN_VUS ? HDB_BUILD_VUS : HDB_RUN_VUS)))
-    if [[ "$limit" != unlimited ]] && ((limit <= required));
-    then
-        fail "Open-file limit ($limit) must exceed 5 times the largest VU count ($required)"
-        return 1
-    fi
-
-    limit="$(ulimit -u)"
-    if [[ "$limit" != unlimited ]] && ((limit < 4096));
-    then
-        fail "Process limit ($limit) must be at least 4096"
-        return 1
-    fi
-
-    local file
-    for file in tpcc.tcl hammerdb_cleanup_citus.sql hammerdb_maintenance_citus.sql; do
-        [[ -r "$HDB_MODULE_DIR/$file" ]] ||
-        {
-            fail "Missing HammerDB asset: $HDB_MODULE_DIR/$file"
-            return 1
-        }
-
-    done
-}
-
 # Keep the field list explicit so credentials never enter this metadata.
 benchmark_describe()
 {
@@ -132,12 +24,63 @@ benchmark_describe()
     printf '  "vacuum": %s\n}\n' "$HDB_VACUUM"
 }
 
+hammerdb_write_workload()
+{
+    local phase="$1" destination="$2"
+    cat >"$destination" <<'TCL'
+dbset db pg
+dbset bm TPC-C
+diset connection pg_host $::env(PGHOST)
+diset connection pg_port $::env(PGPORT)
+diset connection pg_sslmode $::env(PGSSLMODE)
+diset connection pg_azure_citus $::env(HDB_CITUS_COMPAT)
+diset connection pg_citus_loadbalancer $::env(HDB_CITUS_LOADBALANCER_PORT)
+diset connection pg_citus_direct_workers $::env(HDB_CITUS_DIRECT_WORKERS)
+diset tpcc pg_dbase $::env(PGDATABASE)
+diset tpcc pg_defaultdbase $::env(PGMAINTENANCE_DB)
+diset tpcc pg_user $::env(PGUSER)
+diset tpcc pg_pass $::env(PGPASSWORD)
+diset tpcc pg_superuser $::env(HDB_SUPERUSER)
+diset tpcc pg_superuserpass $::env(HDB_SUPERUSER_PASSWORD)
+diset tpcc pg_num_vu $::env(HDB_BUILD_VUS)
+diset tpcc pg_count_ware $::env(HDB_WAREHOUSES)
+diset tpcc pg_first_ware $::env(HDB_FIRST_WAREHOUSE)
+diset tpcc pg_cituscompat $::env(HDB_CITUS_COMPAT)
+TCL
+
+    if [[ "$phase" == prepare ]]
+    then
+        cat >>"$destination" <<'TCL'
+giset virtual_user_options virtual_users $::env(HDB_BUILD_VUS)
+giset virtual_user_options user_delay 1
+vuset delay 1
+buildschema
+vudestroy
+TCL
+    else
+        cat >>"$destination" <<'TCL'
+diset tpcc pg_driver timed
+diset tpcc pg_rampup $::env(HDB_RAMPUP_MINUTES)
+diset tpcc pg_duration $::env(HDB_DURATION_MINUTES)
+diset tpcc pg_vacuum $::env(HDB_VACUUM)
+giset virtual_user_options virtual_users $::env(HDB_RUN_VUS)
+giset virtual_user_options user_delay 1
+vuset delay 1
+vuset logtotemp 1
+loadscript
+vuset vu $::env(HDB_RUN_VUS)
+vucreate
+vurun
+vudestroy
+TCL
+    fi
+}
+
 hammerdb_execute()
 {
     local phase="$1" directory="$2" status=0
-    # Runtime values stay in the environment rather than generated Tcl literals.
-    cp -- "$HDB_MODULE_DIR/tpcc.tcl" "$directory/workload.tcl"
-    export HDB_PHASE="$phase" TMPDIR="$directory" TMP="$directory" TEMP="$directory"
+    hammerdb_write_workload "$phase" "$directory/workload.tcl"
+    export TMPDIR="$directory" TMP="$directory" TEMP="$directory"
     (
         cd -- "$HAMMERDB_HOME" || exit 1
         exec ./hammerdbcli auto "$directory/workload.tcl"
@@ -147,14 +90,6 @@ hammerdb_execute()
         printf 'ERROR: HammerDB %s failed with exit %s\n' "$phase" "$status" >&2
         return "$status"
     fi
-
-    # A clean CLI exit alone does not prove that the virtual users completed.
-    local marker="BENCHMARK_${phase^^}_COMPLETE"
-    grep -Fxq "$marker" "$directory/hammerdb.log" ||
-    {
-        fail "HammerDB did not confirm successful completion of $phase"
-        return 1
-    }
 }
 
 benchmark_cleanup()

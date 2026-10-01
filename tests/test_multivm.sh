@@ -35,7 +35,7 @@ REMOTE_REPO="$TEST_ROOT/remote repo'quoted"
 mkdir -p "$REMOTE_REPO/lib" "$REMOTE_REPO/hammerdb"
 cp -- "$ROOT/wrapper.sh" "$ROOT/connection.env.sample" "$ROOT/run.env.sample" "$REMOTE_REPO/"
 cp -- "$ROOT/lib/"*.sh "$REMOTE_REPO/lib/"
-cp -- "$ROOT/hammerdb/hammerdb.sh" "$ROOT/hammerdb/hammerdb.env.sample" "$ROOT/hammerdb/tpcc.tcl" \
+cp -- "$ROOT/hammerdb/hammerdb.sh" "$ROOT/hammerdb/hammerdb.env.sample" \
     "$ROOT/hammerdb/hammerdb_cleanup_citus.sql" "$ROOT/hammerdb/hammerdb_maintenance_citus.sql" \
     "$REMOTE_REPO/hammerdb/"
 printf 'keep-shared-environment\n' >"$REMOTE_REPO/myenv.sh"

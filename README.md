@@ -6,7 +6,9 @@ Each benchmark adapter owns its workload configuration, preparation, execution,
 and result parsing.
 
 **HammerDB TPCC/TPROC-C is the only implemented benchmark.** There are no pgbench
-or sysbench adapters yet.
+or sysbench adapters yet. The wrapper benchmark name is `hammerdb`; `tpcc` is
+the workload selected by that adapter, not a wrapper benchmark name. Run
+`./wrapper.sh --help` for supported benchmarks and starter commands.
 
 **Configuration is sample-only in Git.** Copy the shipped `*.env.sample`
 templates to private `.env` files before running. Templates are not valid
@@ -77,10 +79,11 @@ leaving it unset triggers the template's Bash guard.
 Preparation is only needed for a new dataset. Subsequent runs reuse it by
 default. Preparation does not implicitly delete existing tables.
 
-`--check` is an **offline preflight**: it validates configuration, executables,
-adapter assets, and resource limits. It does not connect to PostgreSQL, start
+`--check` is an **offline framework preflight**: it validates the selected
+configuration files, runner policy, and PostgreSQL target settings. It does not
+validate HammerDB settings or executables, connect to PostgreSQL, start
 HammerDB, create run output, or verify server privileges/native tool features.
-Every real operation repeats these checks before it starts.
+HammerDB configuration errors are left to HammerDB when an operation runs.
 
 ## Three configuration groups
 
@@ -471,14 +474,16 @@ benchmark-<timestamp>-<unique-suffix>/
 - `result.json`: HammerDB version and native NOPM/TPM values with explicit
   units. NOPM is not renamed to a generic TPS metric.
 
-The copied [Tcl workload](hammerdb/tpcc.tcl) reads credentials from the process
-environment; the framework does not embed them into scripts or configuration
-metadata. Native tool logs should nevertheless be treated as sensitive.
+The HammerDB adapter generates `workload.tcl` in each operation directory. It
+reads credentials from the process environment; the framework does not embed
+them into scripts or configuration metadata. Native tool logs should
+nevertheless be treated as sensitive.
 
-Nonzero tool exits, unsuccessful virtual users, missing completion markers,
-missing/ambiguous metrics, SQL errors, and log-writer failures fail the run.
-The runner stops subsequent iterations and retains the logs. Interruptions
-terminate the adapter's owned process group and record an interrupted run.
+Nonzero tool exits, missing or ambiguous result metrics, SQL errors, and
+log-writer failures fail the run. HammerDB owns validation of its generated Tcl
+configuration and virtual users. The runner stops subsequent iterations and
+retains the logs. Interruptions terminate the adapter's owned process group and
+record an interrupted run.
 
 ## Adapter contract
 
@@ -492,7 +497,6 @@ second CLI.
 
 | Hook | Contract |
 | --- | --- |
-| `benchmark_validate` | Validate benchmark settings/assets without starting a workload |
 | `benchmark_describe` | Emit resolved non-secret settings as JSON |
 | `benchmark_prepare DIRECTORY` | Prepare the dataset, including any tool-specific distributed phase |
 | `benchmark_run DIRECTORY` | Run one iteration and write a validated `result.json` |

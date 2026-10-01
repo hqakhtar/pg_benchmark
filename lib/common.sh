@@ -143,7 +143,12 @@ load_configuration()
 
     [[ -f "$root/$type/$type.sh" ]] ||
     {
-        fail "Unsupported benchmark type: $type"
+        if [[ "$type" == tpcc ]]
+        then
+            fail "'tpcc' is a HammerDB workload, not a benchmark adapter. Use 'hammerdb'. Supported benchmarks: hammerdb"
+        else
+            fail "Unsupported benchmark type: $type. Supported benchmarks: hammerdb"
+        fi
         return 1
     }
 

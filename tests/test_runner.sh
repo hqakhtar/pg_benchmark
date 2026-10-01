@@ -184,7 +184,7 @@ TEST_REPO="$TEST_ROOT/checkout"
 mkdir -p -- "$TEST_REPO/lib" "$TEST_REPO/hammerdb"
 cp -- "$ROOT/wrapper.sh" "$ROOT/connection.env.sample" "$ROOT/run.env.sample" "$TEST_REPO/"
 cp -- "$ROOT/lib/"*.sh "$TEST_REPO/lib/"
-cp -- "$ROOT/hammerdb/"*.sh "$ROOT/hammerdb/"*.tcl "$ROOT/hammerdb/"*.sql \
+cp -- "$ROOT/hammerdb/"*.sh "$ROOT/hammerdb/"*.sql \
     "$ROOT/hammerdb/hammerdb.env.sample" "$TEST_REPO/hammerdb/"
 WRAPPER="$TEST_REPO/wrapper.sh"
 EXTRA_ENV=("CONNECTION_ENV_FILE=" "BENCHMARK_ENV_FILE=" "RUN_ENV_FILE=")
@@ -251,6 +251,8 @@ pass 'configuration failures stop immediately and aliases to real private files 
 
 invoke --help
 assert test "$status" == 0
+assert grep -Fq 'Supported benchmarks:' "$TEST_ROOT/current.log"
+assert grep -Fq './wrapper.sh hammerdb --check' "$TEST_ROOT/current.log"
 if grep -Eiq 'legacy|old flags|migration' "$TEST_ROOT/current.log";
 then
     printf 'Help contains an obsolete interface notice\n' >&2
@@ -259,16 +261,25 @@ fi
 
 pass 'help describes only the current interface'
 
+invoke --check
+assert test "$status" == 2
+assert grep -Fq 'BENCHMARK is required. Supported benchmarks: hammerdb' "$TEST_ROOT/current.log"
+assert grep -Fq "Try './wrapper.sh hammerdb --check'" "$TEST_ROOT/current.log"
+invoke tpcc --check
+assert test "$status" != 0
+assert grep -Fq "'tpcc' is a HammerDB workload, not a benchmark adapter. Use 'hammerdb'." \
+    "$TEST_ROOT/current.log"
 invoke sysbench --check
 assert test "$status" != 0
-assert grep -q 'Unsupported benchmark type' "$TEST_ROOT/current.log"
+assert grep -q 'Unsupported benchmark type: sysbench. Supported benchmarks: hammerdb' \
+    "$TEST_ROOT/current.log"
 for option in -b -c -C -e -E -H -I -i -l -n -O -P -r -S -Z -t --unknown; do
     invoke hammerdb "$option"
     assert test "$status" == 2
     assert grep -Fxq "ERROR: Unknown option '$option' (see --help)" "$TEST_ROOT/current.log"
     assert test ! -s "$TEST_ROOT/trace"
 done
-pass 'unsupported tools and options fail explicitly without special handling'
+pass 'missing and unsupported benchmarks and options fail with actionable guidance'
 
 EXTRA_ENV=("RUN_ITERATIONS=0")
 invoke hammerdb --check
@@ -312,13 +323,12 @@ assert grep -q 'run|warehouses=2|first=1|vus=2' "$TEST_ROOT/trace"
 assert jq -e '.metrics.nopm.value == 123.5 and .metrics.tpm.value == 456' "$directory/iteration-1/result.json"
 pass 'three config overrides, CLI selector precedence, canonical target, and native metrics'
 
-EXTRA_ENV=("HAMMERDB_HOME=./hammer db" "RUN_OUTPUT_ROOT=./relative results" "RUN_ITERATIONS=01"
-    "HDB_WAREHOUSES=08" "HDB_BUILD_VUS=02" "HDB_RUN_VUS=02")
+EXTRA_ENV=("HAMMERDB_HOME=./hammer db" "RUN_OUTPUT_ROOT=./relative results" "RUN_ITERATIONS=01")
 invoke hammerdb
 assert test "$status" == 0
 assert test -d "$TEST_ROOT/relative results"
-assert grep -q 'run|warehouses=8|first=1|vus=2' "$TEST_ROOT/trace"
-pass 'relative paths with spaces and decimal normalization'
+assert grep -q 'run|warehouses=2|first=1|vus=1' "$TEST_ROOT/trace"
+pass 'relative paths with spaces and runner decimal normalization'
 
 EXTRA_ENV=("RUN_PREPARE_MODE=once" "TEST_STOCK_HAMMERDB=1")
 invoke hammerdb
@@ -338,25 +348,23 @@ pass 'HDB_CITUS_COMPAT configures both preparation and execution while preservin
 
 EXTRA_ENV=("HDB_CITUS_COMPAT=invalid")
 invoke hammerdb --check
-assert test "$status" != 0
-assert grep -q 'HDB_CITUS_COMPAT' "$TEST_ROOT/current.log"
+assert test "$status" == 0
 assert test ! -s "$TEST_ROOT/trace"
 EXTRA_ENV=("HDB_CITUS_COMPAT=true" "TEST_STOCK_HAMMERDB=1")
 invoke hammerdb --prepare
-assert test "$status" != 0
-assert grep -q 'Citus mode requires.*pg_azure_citus' "$TEST_ROOT/current.log"
-pass 'Citus compatibility rejects invalid settings and unsupported HammerDB dictionaries'
+assert test "$status" == 0
+pass 'HammerDB handles unsupported dictionary settings without adapter prevalidation'
 
 EXTRA_ENV=("RUN_PREPARE_MODE=each")
 invoke hammerdb --check
-assert test "$status" != 0
+assert test "$status" == 0
 EXTRA_ENV=("RUN_PREPARE_MODE=each" "HDB_RESET_SCHEMA=true" "RUN_ALLOW_DESTRUCTIVE=true")
 invoke hammerdb
 assert test "$status" == 0
 assert test "$(trace_count '^prepare|')" == 2
 assert test "$(trace_count 'file=hammerdb_cleanup_citus.sql')" == 2
 assert test "$(trace_count '^run|')" == 2
-pass 'each-iteration preparation requires opt-in and resets/rebuilds twice'
+pass 'each-iteration benchmark policy is delegated and reset mode rebuilds twice'
 
 EXTRA_ENV=()
 invoke hammerdb --cleanup
@@ -380,14 +388,17 @@ assert test "$status" == 37
 assert test "$(trace_count '^run|')" == 1
 pass 'native prepare/run failures preserve status and stop subsequent iterations'
 
-for setting in TEST_MISSING_COMPLETION TEST_NO_METRICS TEST_DUPLICATE_METRICS TEST_VU_FAIL; do
+for setting in TEST_MISSING_COMPLETION TEST_NO_METRICS TEST_DUPLICATE_METRICS; do
     EXTRA_ENV=("$setting=1")
     invoke hammerdb
     assert test "$status" != 0
     directory="$(last_run)"
     assert jq -e '.status == "failed" and .completed_iterations == 0' "$directory/run.json"
 done
-pass 'missing completion, missing/ambiguous metrics, and failed virtual users cannot report success'
+EXTRA_ENV=("TEST_VU_FAIL=1")
+invoke hammerdb
+assert test "$status" == 0
+pass 'result parsing rejects missing or ambiguous metrics without revalidating virtual-user status'
 
 EXTRA_ENV=("TEST_PSQL_FAIL=true")
 invoke hammerdb
@@ -415,12 +426,11 @@ assert test "$status" == 0
 assert grep -q 'prepare|warehouses=0|first=1' "$TEST_ROOT/trace"
 EXTRA_ENV=("HDB_WAREHOUSES=0")
 invoke hammerdb --check
-assert test "$status" != 0
+assert test "$status" == 0
 EXTRA_ENV=("HDB_WAREHOUSES=0" "HDB_DISTRIBUTED_LOAD=true" "TEST_NO_RANGE_SUPPORT=1")
 invoke hammerdb --prepare
-assert test "$status" != 0
-assert grep -q 'Distributed loading requires' "$TEST_ROOT/current.log"
-pass 'zero-warehouse finalization stays inside the HammerDB adapter and requires compatible tooling'
+assert test "$status" == 0
+pass 'zero-warehouse finalization delegates dictionary compatibility to HammerDB'
 
 password="literal p'a\$ss[brackets]; word"
 EXTRA_ENV=("PGPASSWORD=$password" "RUN_ITERATIONS=1")

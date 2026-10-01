@@ -22,7 +22,7 @@ Options:
   --setup-control-machine Install local provisioning tools (Ubuntu/Debian)
   --setup                 Provision all VMs in this checkout's hosts.txt
   --host HOST             Provision just this VM (setup only; need not be listed)
-  --check                 Validate configuration without connecting or running
+  --check                 Validate runner and target settings without connecting
   --prepare               Prepare data without running iterations
   --cleanup               Remove benchmark data (requires destructive opt-in)
   --connection-env FILE    Select a complete private connection configuration
@@ -43,6 +43,15 @@ The Ansible command is printed before execution. Keep secrets in private
 variable files, not inline arguments; use -e @FILE after --.
 Use dedicated runners: provisioning upgrades packages and stops PostgreSQL.
 See README.md for examples.
+
+Supported benchmarks:
+  hammerdb               HammerDB TPROC-C (TPC-C) for PostgreSQL
+
+Examples:
+  ./wrapper.sh hammerdb --check
+  ./wrapper.sh hammerdb --prepare
+  ./wrapper.sh hammerdb
+  ./wrapper.sh --setup --host runner.example.com -- --check
 EOF
 }
 
@@ -157,7 +166,12 @@ then
 fi
 
 [[ -z "$setup_host" ]] || usage_error "--host is only valid with --setup"
-[[ -n "$BENCHMARK_TYPE" ]] || { usage >&2; exit 2; }
+[[ -n "$BENCHMARK_TYPE" ]] ||
+{
+    printf "ERROR: BENCHMARK is required. Supported benchmarks: hammerdb\n" >&2
+    printf "Try './wrapper.sh hammerdb --check' or './wrapper.sh --help'.\n" >&2
+    exit 2
+}
 
 readonly BENCHMARK_TYPE RUN_ACTION
 export BENCHMARK_TYPE RUN_ACTION
@@ -177,11 +191,10 @@ source "$BENCHMARK_MODULE"
 # Keep preflight offline; target changes start only in runner_main.
 runner_validate
 postgresql_validate
-benchmark_validate
 
 if [[ "$RUN_ACTION" == check ]];
 then
-    printf 'Configuration check passed.\nBenchmark: %s\nTarget: %s@%s:%s/%s\n' \
+    printf 'Runner and target check passed.\nBenchmark: %s\nTarget: %s@%s:%s/%s\n' \
         "$BENCHMARK_TYPE" "$PGUSER" "$PGHOST" "$PGPORT" "$PGDATABASE"
     printf 'Run: %s iteration(s), prepare=%s, output=%s\n' \
         "$RUN_ITERATIONS" "$RUN_PREPARE_MODE" "$RUN_OUTPUT_ROOT"
