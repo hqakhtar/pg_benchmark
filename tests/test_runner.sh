@@ -47,7 +47,8 @@ BASE_ENV=(
     "PGPASSWORD="
     "PG_CONFIG=/deliberately/missing/pg_config"
     "HAMMERDB_HOME=$TEST_ROOT/hammer db" "HDB_WAREHOUSES=2" "HDB_BUILD_VUS=1" "HDB_RUN_VUS=1"
-    "HDB_RAMPUP_MINUTES=0" "HDB_DURATION_MINUTES=1"
+    "HDB_CITUS_AZURE_ELASTIC_CLUSTER=true" "HDB_STOREDPROCS=false"
+    "HDB_RAMPUP_MINUTES=0" "HDB_DURATION_MINUTES=1" "HDB_RAISEERROR=true"
     "RUN_OUTPUT_ROOT=$TEST_ROOT/results" "RUN_ITERATIONS=2"
 )
 EXTRA_ENV=()
@@ -301,7 +302,8 @@ invoke hammerdb
 assert test "$status" == 0
 directory="$(last_run)"
 assert jq -e '.database == "benchmark_db" and .user == "benchmark_user"' "$directory/target.json"
-assert jq -e '.warehouses == 2 and .build_vus == 1 and .run_vus == 1 and .citus == false' "$directory/benchmark.json"
+assert jq -e '.warehouses == 2 and .build_vus == 1 and .run_vus == 1 and
+    .citus == true and .citus_azure_elastic_cluster == true' "$directory/benchmark.json"
 assert grep -q 'psql|database=benchmark_db|user=benchmark_user' "$TEST_ROOT/trace"
 pass 'obsolete environment names do not affect validation, target, or workload'
 
@@ -337,14 +339,27 @@ assert test "$(trace_count '^prepare|')" == 1
 assert test "$(trace_count '^run|')" == 2
 pass 'prepare once and run twice using stock non-Citus dictionaries'
 
-EXTRA_ENV=("HDB_CITUS_COMPAT=true" "RUN_PREPARE_MODE=once" "RUN_ITERATIONS=1")
+EXTRA_ENV=("HDB_CITUS_COMPAT=true" "HDB_CITUS_AZURE_ELASTIC_CLUSTER=true"
+    "RUN_PREPARE_MODE=once" "RUN_ITERATIONS=1")
 invoke hammerdb
 assert test "$status" == 0
 directory="$(last_run)"
-assert jq -e '.citus == true' "$directory/benchmark.json"
+assert jq -e '.citus == true and .citus_azure_elastic_cluster == true' \
+    "$directory/benchmark.json"
+assert grep -Fq 'diset connection pg_host "mock-db.invalid"' \
+    "$directory/iteration-1/workload.tcl"
+assert grep -Fq 'diset tpcc pg_citus_azure_elastic_cluster "true"' \
+    "$directory/iteration-1/workload.tcl"
+assert grep -Fq 'diset tpcc pg_raiseerror "true"' "$directory/iteration-1/workload.tcl"
+assert grep -Fq 'diset tpcc pg_storedprocs "false"' "$directory/iteration-1/workload.tcl"
+assert grep -Fq '# diset tpcc pg_first_ware "1"' \
+    "$directory/iteration-1/workload.tcl"
+assert grep -Fq '# diset connection pg_citus_direct_workers "true"' \
+    "$directory/iteration-1/workload.tcl"
+assert test "$(grep -Fc '$::env(' "$directory/iteration-1/workload.tcl")" == 2
 assert test "$(trace_count '^prepare|')" == 1
 assert test "$(trace_count '^run|')" == 1
-pass 'HDB_CITUS_COMPAT configures both preparation and execution while preserving the metadata schema'
+pass 'Azure Elastic Cluster settings configure preparation and execution metadata'
 
 EXTRA_ENV=("HDB_CITUS_COMPAT=invalid")
 invoke hammerdb --check
@@ -374,8 +389,11 @@ EXTRA_ENV=("RUN_ALLOW_DESTRUCTIVE=true" "HDB_SUPERUSER=maintenance_user")
 invoke hammerdb --cleanup
 assert test "$status" == 0
 assert grep -q 'psql|database=benchmark_db|user=maintenance_user|file=hammerdb_cleanup_citus.sql' "$TEST_ROOT/trace"
+assert grep -Fq "WHEN 'p' THEN 'PROCEDURE'" "$ROOT/hammerdb/hammerdb_cleanup_citus.sql"
+assert grep -Fq "'DROP %s IF EXISTS %I.%I(%s) CASCADE'" \
+    "$ROOT/hammerdb/hammerdb_cleanup_citus.sql"
 assert test "$(trace_count '^run|')" == 0
-pass 'explicit cleanup requires permission and keeps the database target with a distinct admin role'
+pass 'explicit cleanup handles functions and procedures using a distinct admin role'
 
 EXTRA_ENV=("RUN_ITERATIONS=1" "TEST_HDB_FAIL=73")
 invoke hammerdb --prepare

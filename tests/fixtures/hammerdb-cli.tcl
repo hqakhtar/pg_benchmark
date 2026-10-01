@@ -1,26 +1,19 @@
 puts "HammerDB CLI v5.0-test"
 
 set configpostgresql [dict create \
-    connection [dict create pg_host "" pg_port "" pg_sslmode "" \
-        pg_azure_citus false pg_citus_loadbalancer 7432 pg_citus_direct_workers true] \
+    connection [dict create pg_host "" pg_port "" pg_sslmode ""] \
     tpcc [dict create pg_dbase "" pg_defaultdbase "" pg_user "" pg_superuser "" \
         pg_pass old-secret pg_superuserpass old-secret pg_num_vu 1 pg_count_ware 1 \
-        pg_cituscompat false pg_first_ware 1 pg_driver timed pg_rampup 0 \
-        pg_duration 1 pg_vacuum true]]
-
-if {[info exists ::env(TEST_NO_RANGE_SUPPORT)]} {
-    dict unset configpostgresql tpcc pg_first_ware
-}
-if {[info exists ::env(TEST_STOCK_HAMMERDB)]} {
-    foreach key {pg_azure_citus pg_citus_loadbalancer pg_citus_direct_workers} {
-        dict unset configpostgresql connection $key
-    }
-    dict unset configpostgresql tpcc pg_first_ware
-}
+        pg_cituscompat false pg_citus_azure_elastic_cluster false \
+        pg_citus_loadbalancer 0 pg_storedprocs false pg_driver timed pg_rampup 0 \
+        pg_duration 1 pg_raiseerror false pg_vacuum false]]
 
 proc dbset {args} {}
 proc quotemeta {value} { return $value }
 proc diset {section key value} {
+    if {![dict exists $::configpostgresql $section $key]} {
+        error "Unknown HammerDB dictionary setting $section:$key"
+    }
     dict set ::configpostgresql $section $key $value
 }
 proc giset {args} {}
@@ -43,8 +36,12 @@ proc run_phase {phase} {
         error "The adapter changed the canonical connection"
     }
     if {[dict get $::configpostgresql tpcc pg_cituscompat] ne $::env(HDB_CITUS_COMPAT) ||
-        ([dict exists $::configpostgresql connection pg_azure_citus] &&
-         [dict get $::configpostgresql connection pg_azure_citus] ne $::env(HDB_CITUS_COMPAT))} {
+        [dict get $::configpostgresql tpcc pg_citus_azure_elastic_cluster] ne
+            $::env(HDB_CITUS_AZURE_ELASTIC_CLUSTER) ||
+        [dict get $::configpostgresql tpcc pg_citus_loadbalancer] ne
+            $::env(HDB_CITUS_LOADBALANCER_PORT) ||
+        [dict get $::configpostgresql tpcc pg_storedprocs] ne
+            $::env(HDB_STOREDPROCS)} {
         error "Citus compatibility did not reach the HammerDB dictionaries"
     }
     set expected_password ""

@@ -166,12 +166,18 @@ BEGIN
   END LOOP;
 END $$;
 
--- Functions (rare, but safe)
+-- Functions and procedures
 DO $$
 DECLARE r record;
 BEGIN
   FOR r IN
-    SELECT n.nspname AS schemaname, p.proname, pg_get_function_identity_arguments(p.oid) AS args
+    SELECT n.nspname AS schemaname,
+           p.proname,
+           pg_get_function_identity_arguments(p.oid) AS args,
+           CASE p.prokind
+             WHEN 'p' THEN 'PROCEDURE'
+             ELSE 'FUNCTION'
+           END AS object_type
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public'
@@ -186,7 +192,13 @@ BEGIN
         p.proname ILIKE '%ostat%'
       )
   LOOP
-    EXECUTE format('DROP FUNCTION IF EXISTS %I.%I(%s) CASCADE', r.schemaname, r.proname, r.args);
+    EXECUTE format(
+      'DROP %s IF EXISTS %I.%I(%s) CASCADE',
+      r.object_type,
+      r.schemaname,
+      r.proname,
+      r.args
+    );
   END LOOP;
 END $$;
 
@@ -285,4 +297,3 @@ WHERE n.nspname = 'public'
     )
   )
 ORDER BY c.relkind, c.relname;
-

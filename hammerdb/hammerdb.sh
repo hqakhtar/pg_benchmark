@@ -15,60 +15,79 @@ benchmark_describe()
     printf '  "run_vus": %s,\n' "$HDB_RUN_VUS"
     printf '  "rampup_minutes": %s,\n' "$HDB_RAMPUP_MINUTES"
     printf '  "duration_minutes": %s,\n' "$HDB_DURATION_MINUTES"
+    printf '  "raise_error": %s,\n' "$HDB_RAISEERROR"
     printf '  "citus": %s,\n' "$HDB_CITUS_COMPAT"
+    printf '  "citus_azure_elastic_cluster": %s,\n' "$HDB_CITUS_AZURE_ELASTIC_CLUSTER"
     printf '  "citus_loadbalancer_port": %s,\n' "$HDB_CITUS_LOADBALANCER_PORT"
     printf '  "citus_direct_workers": %s,\n' "$HDB_CITUS_DIRECT_WORKERS"
+    printf '  "stored_procedures": %s,\n' "$HDB_STOREDPROCS"
     printf '  "distributed_load": %s,\n' "$HDB_DISTRIBUTED_LOAD"
     printf '  "reset_schema": %s,\n' "$HDB_RESET_SCHEMA"
     printf '  "maintenance": %s,\n' "$HDB_MAINTENANCE"
     printf '  "vacuum": %s\n}\n' "$HDB_VACUUM"
 }
 
+tcl_literal()
+{
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//\$/\\\$}"
+    value="${value//\[/\\[}"
+    value="${value//\]/\\]}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '"%s"' "$value"
+}
+
 hammerdb_write_workload()
 {
     local phase="$1" destination="$2"
-    cat >"$destination" <<'TCL'
+    cat >"$destination" <<TCL
 dbset db pg
 dbset bm TPC-C
-diset connection pg_host $::env(PGHOST)
-diset connection pg_port $::env(PGPORT)
-diset connection pg_sslmode $::env(PGSSLMODE)
-diset connection pg_azure_citus $::env(HDB_CITUS_COMPAT)
-diset connection pg_citus_loadbalancer $::env(HDB_CITUS_LOADBALANCER_PORT)
-diset connection pg_citus_direct_workers $::env(HDB_CITUS_DIRECT_WORKERS)
-diset tpcc pg_dbase $::env(PGDATABASE)
-diset tpcc pg_defaultdbase $::env(PGMAINTENANCE_DB)
-diset tpcc pg_user $::env(PGUSER)
+diset connection pg_host $(tcl_literal "$PGHOST")
+diset connection pg_port $(tcl_literal "$PGPORT")
+diset connection pg_sslmode $(tcl_literal "$PGSSLMODE")
+# diset connection pg_citus_direct_workers $(tcl_literal "$HDB_CITUS_DIRECT_WORKERS")
+diset tpcc pg_dbase $(tcl_literal "$PGDATABASE")
+diset tpcc pg_defaultdbase $(tcl_literal "$PGMAINTENANCE_DB")
+diset tpcc pg_user $(tcl_literal "$PGUSER")
 diset tpcc pg_pass $::env(PGPASSWORD)
-diset tpcc pg_superuser $::env(HDB_SUPERUSER)
+diset tpcc pg_superuser $(tcl_literal "$HDB_SUPERUSER")
 diset tpcc pg_superuserpass $::env(HDB_SUPERUSER_PASSWORD)
-diset tpcc pg_num_vu $::env(HDB_BUILD_VUS)
-diset tpcc pg_count_ware $::env(HDB_WAREHOUSES)
-diset tpcc pg_first_ware $::env(HDB_FIRST_WAREHOUSE)
-diset tpcc pg_cituscompat $::env(HDB_CITUS_COMPAT)
+diset tpcc pg_num_vu $(tcl_literal "$HDB_BUILD_VUS")
+diset tpcc pg_count_ware $(tcl_literal "$HDB_WAREHOUSES")
+# diset tpcc pg_first_ware $(tcl_literal "$HDB_FIRST_WAREHOUSE")
+diset tpcc pg_cituscompat $(tcl_literal "$HDB_CITUS_COMPAT")
+diset tpcc pg_citus_azure_elastic_cluster $(tcl_literal "$HDB_CITUS_AZURE_ELASTIC_CLUSTER")
+diset tpcc pg_citus_loadbalancer $(tcl_literal "$HDB_CITUS_LOADBALANCER_PORT")
+diset tpcc pg_storedprocs $(tcl_literal "$HDB_STOREDPROCS")
 TCL
 
     if [[ "$phase" == prepare ]]
     then
-        cat >>"$destination" <<'TCL'
-giset virtual_user_options virtual_users $::env(HDB_BUILD_VUS)
+        cat >>"$destination" <<TCL
+giset virtual_user_options virtual_users $(tcl_literal "$HDB_BUILD_VUS")
 giset virtual_user_options user_delay 1
 vuset delay 1
 buildschema
 vudestroy
 TCL
     else
-        cat >>"$destination" <<'TCL'
+        cat >>"$destination" <<TCL
 diset tpcc pg_driver timed
-diset tpcc pg_rampup $::env(HDB_RAMPUP_MINUTES)
-diset tpcc pg_duration $::env(HDB_DURATION_MINUTES)
-diset tpcc pg_vacuum $::env(HDB_VACUUM)
-giset virtual_user_options virtual_users $::env(HDB_RUN_VUS)
+diset tpcc pg_rampup $(tcl_literal "$HDB_RAMPUP_MINUTES")
+diset tpcc pg_duration $(tcl_literal "$HDB_DURATION_MINUTES")
+diset tpcc pg_raiseerror $(tcl_literal "$HDB_RAISEERROR")
+diset tpcc pg_vacuum $(tcl_literal "$HDB_VACUUM")
+giset virtual_user_options virtual_users $(tcl_literal "$HDB_RUN_VUS")
 giset virtual_user_options user_delay 1
 vuset delay 1
 vuset logtotemp 1
 loadscript
-vuset vu $::env(HDB_RUN_VUS)
+vuset vu $(tcl_literal "$HDB_RUN_VUS")
 vucreate
 vurun
 vudestroy

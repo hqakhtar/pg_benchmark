@@ -177,16 +177,28 @@ The main settings are `HAMMERDB_HOME`, `HDB_WAREHOUSES`, `HDB_BUILD_VUS`,
 - `HDB_MAINTENANCE=true` performs SQL maintenance before each benchmark
   iteration. There are no hidden 60-second sleeps.
 - `HDB_VACUUM=true` enables HammerDB's timed-driver vacuum behavior.
+- `HDB_RAISEERROR=true` makes virtual users report the underlying PostgreSQL
+  error and stop instead of repeating HammerDB's generic procedure-error text.
+- `HDB_STOREDPROCS=false` builds and calls PostgreSQL function variants.
+  Preparation and benchmark execution must use the same setting.
 - `HDB_SUPERUSER_PASSWORD` defaults to `PGPASSWORD` when supplied. Otherwise
   libpq password-file authentication can be used for each role.
 
 Stock PostgreSQL HammerDB dictionaries work for ordinary non-Citus preparation
-and execution. `HDB_CITUS_COMPAT=true` uses the connection options expected by this
-repository's Citus-compatible HammerDB build. Distributed preparation also
-requires a build supporting `pg_first_ware` and the zero-warehouse post-data
-DDL protocol. These capabilities are checked by Tcl before it starts the
-workload; offline preflight cannot establish that an installation supports
-them.
+and execution. `HDB_CITUS_COMPAT=true` enables Citus compatibility.
+`HDB_CITUS_AZURE_ELASTIC_CLUSTER=true` sets HammerDB's
+`pg_citus_azure_elastic_cluster`; use it together with Citus compatibility for
+Azure Cosmos DB for PostgreSQL Elastic Clusters. The target database must
+already exist in this mode, and HammerDB does not try to change its owner.
+`HDB_CITUS_LOADBALANCER_PORT` selects the data connection port and defaults to
+`0`, which makes HammerDB use `PGPORT`.
+
+The generated Tcl comments out the custom `pg_first_ware` and
+`pg_citus_direct_workers` settings because they are not present in the standard
+HammerDB dictionary shown by `print dict`. A custom distributed-loading build
+must restore those settings before using the multi-VM warehouse-range workflow.
+HammerDB reports unsupported settings when an operation runs; `--check` does
+not validate its dictionary.
 
 ### Run policy
 

@@ -65,8 +65,8 @@ BASE_ENV=(
     "HAMMERDB_HOME=$TEST_ROOT/hammer db" "HDB_BUILD_VUS=4"
     "RUN_OUTPUT_ROOT=$TEST_ROOT/results" "LOG_DIR=$TEST_ROOT/logs"
 )
-EXTRA_ENV=("HDB_CITUS_COMPAT=true" "PG_DBASE=ignored_database" "PG_USER=ignored_user"
-    "PG_COUNT_WARE=0" "PG_NUM_VU=0")
+EXTRA_ENV=("HDB_CITUS_COMPAT=true" "HDB_CITUS_AZURE_ELASTIC_CLUSTER=true"
+    "PG_DBASE=ignored_database" "PG_USER=ignored_user" "PG_COUNT_WARE=0" "PG_NUM_VU=0")
 DEFAULT_CONFIG_ARGS=(--connection-env "$TEST_ROOT/connection.env"
     --benchmark-env "$TEST_ROOT/benchmark.env" --run-env "$TEST_ROOT/run.env")
 CONFIG_ARGS=("${DEFAULT_CONFIG_ARGS[@]}")
