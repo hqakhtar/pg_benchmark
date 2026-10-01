@@ -60,8 +60,10 @@ ansible-playbook -i ../../hosts.txt runner_setup.yml
 
 Ansible accepts this plain host-per-line file directly as an INI inventory.
 No separate inventory file or generated copy is needed. The playbook targets
-every host in the selected file; keep only dedicated runner machines in it.
-Use `--limit HOST` to select one runner.
+every uncommented host in the selected file; keep only dedicated runner
+machines in it. Blank lines and lines starting with `#`, including comments
+with leading whitespace, are ignored. Comment out a runner's entire line to
+temporarily exclude it, or use `--limit HOST` to select one runner.
 
 The defaults in [vars.yml](vars.yml) install PostgreSQL 17, the runner
 prerequisites, this repository, and HammerDB when the requested version is

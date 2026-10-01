@@ -350,6 +350,19 @@ test -e hosts.txt || cp hosts.txt.sample hosts.txt
 ${EDITOR:-vi} hosts.txt
 ```
 
+Blank lines and lines starting with `#` are skipped when reading the host list,
+including comments with leading whitespace. To temporarily disable a runner,
+comment out its entire line. For example, this list selects only
+`citus-runner-m1`:
+
+```text
+# Selected runner
+citus-runner-m1
+#citus-runner-m2
+```
+
+The wrapper and multi-VM data preparation require at least one uncommented host.
+
 Ansible reads the same plain file directly as its inventory; do not maintain a
 second list. Keep inventory group headers and connection variables out of this
 file. Ansible's SSH defaults are in [setup/ansible/vars.yml](setup/ansible/vars.yml).

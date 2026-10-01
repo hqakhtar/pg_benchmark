@@ -60,10 +60,11 @@ read_runner_hosts()
 
     HOSTS=()
     while IFS= read -r host || [[ -n "$host" ]]; do
-        host="${host%%#*}"
         host="${host#"${host%%[![:space:]]*}"}"
         host="${host%"${host##*[![:space:]]}"}"
-        [[ -n "$host" ]] || continue
+        [[ -n "$host" && "$host" != \#* ]] || continue
+        host="${host%%#*}"
+        host="${host%"${host##*[![:space:]]}"}"
         validate_runner_host "$host" || return 1
         [[ -z "${seen_hosts[$host]+present}" ]] || { fail "Duplicate runner host: $host"; return 1; }
 

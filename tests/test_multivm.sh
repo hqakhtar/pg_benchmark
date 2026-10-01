@@ -40,7 +40,7 @@ cp -- "$ROOT/hammerdb/hammerdb.sh" "$ROOT/hammerdb/hammerdb.env.sample" \
     "$REMOTE_REPO/hammerdb/"
 printf 'keep-shared-environment\n' >"$REMOTE_REPO/myenv.sh"
 printf 'keep-private-connection\n' >"$REMOTE_REPO/connection.local.env"
-printf '# Runners\r\nrunner-a\r\nrunner-b\r\nrunner-c\r\n' >"$TEST_ROOT/hosts"
+printf '# Runners\r\nrunner-a\r\n# Disabled runner\r\nrunner-b\r\nrunner-c\r\n' >"$TEST_ROOT/hosts"
 cp -- "$ROOT/hammerdb/hammerdb.env.sample" "$TEST_ROOT/benchmark.env"
 cp -- "$ROOT/run.env.sample" "$TEST_ROOT/run.env"
 printf "export HDB_SUPERUSER_PASSWORD=''\n" >>"$TEST_ROOT/benchmark.env"

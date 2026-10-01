@@ -25,7 +25,8 @@ trap '
 ' EXIT
 export ANSIBLE_LOCAL_TEMP="$TEST_ROOT/ansible-local"
 export ANSIBLE_NOCOLOR=1
-printf '# Shared runner hosts\nrunner-a\n\nrunner-b' >"$TEST_ROOT/hosts.txt"
+printf '# Shared runner hosts\nrunner-a\n# Temporarily disabled runners stay commented out\n\nrunner-b' \
+    >"$TEST_ROOT/hosts.txt"
 
 assert_hosts()
 {
