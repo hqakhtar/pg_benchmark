@@ -240,7 +240,27 @@ then
     [[ -z "$connection_file" ]] || load_options+=(--connection-env "$connection_file")
     [[ -z "$benchmark_file" ]] || load_options+=(--benchmark-env "$benchmark_file")
     [[ -z "$run_file" ]] || load_options+=(--run-env "$run_file")
-    exec bash "$loader" "$FRAMEWORK_ROOT/hosts.txt" "${load_options[@]}"
+    load_pid=""
+    stop_load()
+    {
+        if [[ -n "$load_pid" ]]
+        then
+            kill -TERM "$load_pid" 2>/dev/null || :
+            wait "$load_pid" 2>/dev/null || :
+        fi
+    }
+    trap stop_load EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    TIMEFORMAT='Timing [overall]: real=%3Rs user=%3Us sys=%3Ss'
+    time {
+        bash "$loader" "$FRAMEWORK_ROOT/hosts.txt" "${load_options[@]}" &
+        load_pid=$!
+        load_status=0
+        wait "$load_pid" || load_status=$?
+        load_pid=""
+    }
+    exit "$load_status"
 fi
 
 trap 'printf "ERROR: Configuration or runner failed at line %s (exit %s)\n" "$LINENO" "$?" >&2' ERR

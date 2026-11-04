@@ -13,6 +13,7 @@ Usage: run_tpcc_load_multivm.sh HOSTS_FILE [REMOTE_REPO [TOTAL_WAREHOUSES]]
 Load the three configuration groups used by wrapper.sh hammerdb, check all
 runners, clean up once, bootstrap warehouse 1, load disjoint warehouse ranges,
 then finalize post-data DDL. This does not run benchmark iterations.
+Bash time reports wall-clock, user CPU and system CPU time for each phase.
 
 Requires PG_TARGET_MODE=existing and RUN_ALLOW_DESTRUCTIVE=true.
 REMOTE_REPO defaults to RUN_REMOTE_REPO from the selected run environment.
@@ -316,48 +317,57 @@ printf 'Log directory: %s\n' "$LOG_DIR"
 total_start="$SECONDS"
 
 printf '[preflight] Checking all runners before cleanup\n'
-for host in "${HOSTS[@]}"; do
-    run_single "$host" preflight --check 1 1 1
-done
+TIMEFORMAT='Timing [preflight]: real=%3Rs user=%3Us sys=%3Ss'
+time {
+    for host in "${HOSTS[@]}"; do
+        run_single "$host" preflight --check 1 1 1
+    done
+}
 printf '[cleanup] Removing existing benchmark objects on %s\n' "${HOSTS[0]}"
-run_single "${HOSTS[0]}" cleanup --cleanup 1 1 1
+TIMEFORMAT='Timing [cleanup]: real=%3Rs user=%3Us sys=%3Ss'
+time run_single "${HOSTS[0]}" cleanup --cleanup 1 1 1
 printf '[phase1] Bootstrapping warehouse 1\n'
 phase_start="$SECONDS"
-run_single "${HOSTS[0]}" bootstrap --prepare 1 1 1
+TIMEFORMAT='Timing [bootstrap]: real=%3Rs user=%3Us sys=%3Ss'
+time run_single "${HOSTS[0]}" bootstrap --prepare 1 1 1
 phase1_seconds=$((SECONDS - phase_start))
 
 printf '[phase2] Loading remaining warehouse ranges\n'
 phase_start="$SECONDS"
-for ((index = 0; index < ${#HOSTS[@]}; index++)); do
-    count="${counts[$index]}"
-    ((count > 0)) || continue
-    vus="$HDB_BUILD_VUS"
-    if ((vus > count));
-    then
-        vus="$count";
-    fi
+TIMEFORMAT='Timing [parallel]: real=%3Rs user=%3Us sys=%3Ss'
+time {
+    for ((index = 0; index < ${#HOSTS[@]}; index++)); do
+        count="${counts[$index]}"
+        ((count > 0)) || continue
+        vus="$HDB_BUILD_VUS"
+        if ((vus > count));
+        then
+            vus="$count";
+        fi
 
-    remote_job "${HOSTS[$index]}" data --prepare "${firsts[$index]}" "$count" "$vus" &
-    active_jobs+=("$!")
-done
-# Every data job must succeed before post-data DDL is allowed to run.
-phase2_failed=false
-for ((index = 0; index < ${#active_jobs[@]}; index++)); do
-    if ! wait "${active_jobs[$index]}";
-    then
-        phase2_failed=true;
-    fi
+        remote_job "${HOSTS[$index]}" data --prepare "${firsts[$index]}" "$count" "$vus" &
+        active_jobs+=("$!")
+    done
+    # Every data job must succeed before post-data DDL is allowed to run.
+    phase2_failed=false
+    for ((index = 0; index < ${#active_jobs[@]}; index++)); do
+        if ! wait "${active_jobs[$index]}";
+        then
+            phase2_failed=true;
+        fi
 
-    active_jobs[$index]=""
-done
-active_jobs=()
-[[ "$phase2_failed" == false ]] || { fail "At least one data loader failed; refusing post-data DDL"; exit 1; }
+        active_jobs[$index]=""
+    done
+    active_jobs=()
+    [[ "$phase2_failed" == false ]] || { fail "At least one data loader failed; refusing post-data DDL"; exit 1; }
+}
 
 phase2_seconds=$((SECONDS - phase_start))
 
 printf '[phase3] Finalizing post-data DDL\n'
 phase_start="$SECONDS"
-run_single "${HOSTS[0]}" finalize --prepare 1 0 1
+TIMEFORMAT='Timing [finalize]: real=%3Rs user=%3Us sys=%3Ss'
+time run_single "${HOSTS[0]}" finalize --prepare 1 0 1
 phase3_seconds=$((SECONDS - phase_start))
 printf 'Load completed successfully.\nTiming (seconds): bootstrap=%s parallel=%s finalize=%s total=%s\n' \
     "$phase1_seconds" "$phase2_seconds" "$phase3_seconds" "$((SECONDS - total_start))"

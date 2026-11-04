@@ -524,6 +524,14 @@ and their environment-variable equivalents work as with other benchmark actions.
 The loader reads each selected configuration once. Ordinary `--prepare` still
 prepares only on the current machine.
 
+Bash's built-in `time` prints `real` (wall-clock), `user` and `sys` CPU seconds
+for preflight, cleanup, bootstrap, parallel loading and finalization. The
+parallel timer includes waiting for every loader, not just launching jobs.
+The wrapper also prints overall process timing, including on failure; timing
+is written to standard error. CPU figures describe control-machine processes,
+not database-server or remote-runner CPU usage. Per-runner elapsed seconds and
+exit codes remain available in the loader's `.log.status` files.
+
 The direct script interface remains available:
 `setup/run_tpcc_load_multivm.sh HOSTS_FILE [REMOTE_REPO [TOTAL_WAREHOUSES]]`.
 Explicit positional values override `RUN_REMOTE_REPO` and `HDB_WAREHOUSES`.

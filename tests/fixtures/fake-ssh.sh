@@ -30,6 +30,16 @@ while IFS= read -r line; do
     esac
 done <"$packet"
 printf 'ssh|%s|%s|%s\n' "$host" "$action" "$phase" >>"$TEST_TRACE"
+if [[ "${TEST_FAIL_PHASE:-}" == "$phase" ]];
+then
+    exit 24
+fi
+
+if [[ "${TEST_DELAY_DATA:-false}" == true && "$phase" == data ]];
+then
+    sleep 1
+fi
+
 if [[ "${TEST_FAIL_PREFLIGHT_HOST:-}" == "$host" && "$phase" == preflight ]];
 then
     exit 255

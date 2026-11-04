@@ -113,8 +113,18 @@ pass()
     printf 'PASS: %s\n' "$1"
 }
 
+assert_timing()
+{
+    assert grep -Eq "^Timing \\[$1\\]: real=[0-9]+[.][0-9]{3}s user=[0-9]+[.][0-9]{3}s sys=[0-9]+[.][0-9]{3}s$" \
+        "$TEST_ROOT/current.log"
+}
+
 invoke 10
 assert test "$status" == 0
+for phase in preflight cleanup bootstrap parallel finalize
+do
+    assert_timing "$phase"
+done
 assert grep -q 'runner-a first=2 count=3 last=4' "$TEST_ROOT/current.log"
 assert grep -q 'runner-b first=5 count=3 last=7' "$TEST_ROOT/current.log"
 assert grep -q 'runner-c first=8 count=3 last=10' "$TEST_ROOT/current.log"
@@ -167,6 +177,7 @@ WRAPPER_MODE=true
 EXTRA_ENV=("HDB_WAREHOUSES=10")
 invoke
 assert test "$status" == 0
+assert_timing overall
 assert grep -q 'runner-c first=8 count=3 last=10' "$TEST_ROOT/current.log"
 assert grep -q '^prepare|warehouses=3|first=5|vus=3|host=runner-b|phase=data$' "$TEST_ROOT/trace"
 assert test "$(wc -l <"$TEST_ROOT/config-loads")" == 1
@@ -180,10 +191,16 @@ pass 'wrapper loads env-derived remote path and warehouse total once using check
 for ((index = 1; index <= 20; index++)); do
     printf 'runner-%02d\n' "$index"
 done >"$REMOTE_REPO/hosts.txt"
-EXTRA_ENV=("HDB_WAREHOUSES=2000")
+EXTRA_ENV=("HDB_WAREHOUSES=2000" "TEST_DELAY_DATA=true")
 CONFIG_ARGS=()
 invoke
 assert test "$status" == 0
+assert_timing parallel
+assert_timing overall
+assert awk '/^Timing \[parallel\]:/ {
+    split($3, elapsed, "=")
+    if (elapsed[2] + 0 >= 1) found=1
+} END { if (!found) exit 1 }' "$TEST_ROOT/current.log"
 assert test "$(grep -c '^ssh|.*|--check|preflight$' "$TEST_ROOT/trace")" == 20
 assert test "$(grep -c '^ssh|.*|--prepare|data$' "$TEST_ROOT/trace")" == 20
 assert grep -q 'runner-01 first=2 count=99 last=100' "$TEST_ROOT/current.log"
@@ -199,8 +216,57 @@ pass 'wrapper environment selectors partition exactly 2000 warehouses across 20 
 EXTRA_ENV=("HDB_WAREHOUSES=10" "TEST_FAIL_DATA_HOST=runner-b")
 invoke
 assert test "$status" != 0
+assert_timing parallel
+assert_timing overall
 assert grep -q 'refusing post-data DDL' "$TEST_ROOT/current.log"
 pass 'wrapper parallel loading preserves orchestration failures'
+
+for phase in preflight cleanup bootstrap finalize
+do
+    EXTRA_ENV=("HDB_WAREHOUSES=10" "TEST_FAIL_PHASE=$phase")
+    invoke
+    assert test "$status" == 24
+    assert_timing "$phase"
+    assert_timing overall
+    if grep -q 'Load completed successfully' "$TEST_ROOT/current.log"
+    then
+        printf 'A failed timed phase reported success\n' >&2
+        exit 1
+    fi
+done
+pass 'failed serial phases print step and overall timing without changing exit status'
+
+: >"$TEST_ROOT/trace"
+env -i "${BASE_ENV[@]}" "HDB_WAREHOUSES=10" "TEST_DELAY_DATA=true" \
+    bash "$REMOTE_REPO/wrapper.sh" hammerdb --load "${CONFIG_ARGS[@]}" \
+    >"$TEST_ROOT/current.log" 2>&1 &
+wrapper_pid=$!
+for ((attempt = 0; attempt < 200; attempt++)); do
+    if grep -q '^ssh|.*|--prepare|data$' "$TEST_ROOT/trace"
+    then
+        break
+    fi
+    sleep 0.05
+done
+kill -TERM "$wrapper_pid"
+status=0
+wait "$wrapper_pid" || status=$?
+assert test "$status" == 143
+assert_timing overall
+if grep -q '|finalize$' "$TEST_ROOT/trace"
+then
+    printf 'Interrupted loading continued to finalization\n' >&2
+    exit 1
+fi
+for ((attempt = 0; attempt < 100; attempt++)); do
+    if [[ -z "$(find "$TEST_ROOT/logs" "$REMOTE_REPO/benchmark-results" -name '.request-*' -print -quit)" ]]
+    then
+        break
+    fi
+    sleep 0.05
+done
+assert test -z "$(find "$TEST_ROOT/logs" "$REMOTE_REPO/benchmark-results" -name '.request-*' -print -quit)"
+pass 'timed wrapper interruption stops loader jobs and removes request files'
 
 EXTRA_ENV=("HDB_WAREHOUSES=10")
 for option in --prepare --check --cleanup --setup --update-config
