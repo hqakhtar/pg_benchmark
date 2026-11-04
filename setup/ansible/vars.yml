@@ -39,8 +39,8 @@ install_hammerdb: true
 reinstall_hammerdb: false
 # Match this to the archive's top-level directory. A custom tarball path does
 # not infer the version; mismatched contents fail preflight when installing.
-hammerdb_version: "5.0"
+hammerdb_version: "6.1"
+local_hammerdb_tarball: "/home/virus/sources/HammerDB/Build/BawtBuild/Linux/x64/Release/Distribution/HammerDB-{{ hammerdb_version }}-Prod-Linux.tar.gz"
 hammerdb_dir_name: "HammerDB-{{ hammerdb_version }}"
 hammerdb_archive_name: "{{ hammerdb_dir_name }}-Prod-Linux.tar.gz"
-local_hammerdb_tarball: "{{ playbook_dir }}/{{ hammerdb_archive_name }}"
 hammerdb_dest: "{{ runner_home }}"

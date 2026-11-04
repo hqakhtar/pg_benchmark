@@ -181,6 +181,8 @@ The main settings are `HAMMERDB_HOME`, `HDB_WAREHOUSES`, `HDB_BUILD_VUS`,
   error and stop instead of repeating HammerDB's generic procedure-error text.
 - `HDB_STOREDPROCS=false` builds and calls PostgreSQL function variants.
   Preparation and benchmark execution must use the same setting.
+- `HDB_RAMPUP_MINUTES=0` starts measurement without a warm-up period, and
+  `HDB_DURATION_MINUTES=1` runs the measured benchmark for one minute.
 - `HDB_SUPERUSER_PASSWORD` defaults to `PGPASSWORD` when supplied. Otherwise
   libpq password-file authentication can be used for each role.
 
@@ -191,7 +193,7 @@ and execution. `HDB_CITUS_COMPAT=true` enables Citus compatibility.
 Azure Cosmos DB for PostgreSQL Elastic Clusters. The target database must
 already exist in this mode, and HammerDB does not try to change its owner.
 `HDB_CITUS_LOADBALANCER_PORT` selects the data connection port and defaults to
-`0`, which makes HammerDB use `PGPORT`.
+`7432`. Set it to `0` to make HammerDB use `PGPORT`.
 
 The generated Tcl comments out the custom `pg_first_ware` and
 `pg_citus_direct_workers` settings because they are not present in the standard
@@ -352,7 +354,6 @@ or SSH alias per line. It is the shared host list for:
 
 - [Wrapper setup](#runner-vm-setup).
 - [Ansible provisioning](setup/ansible/README.md).
-- [Multi-runner setup](setup/setup_multi_runners.sh).
 - [Multi-VM data preparation](setup/run_tpcc_load_multivm.sh).
 
 Create it from the sample only if it does not already exist:
@@ -656,8 +657,8 @@ system packages, installs PostgreSQL tools, and stops/disables the system
 PostgreSQL service. Skipping HammerDB installation does not skip those tasks;
 use Ansible tags when only a specific operation is intended.
 
-The [standalone Ubuntu setup](setup/setup_runner_ubuntu.sh) remains available for
-dedicated runners. [setup/build_hammerdb.sh](setup/build_hammerdb.sh) builds a
+Use [Ansible provisioning](setup/ansible/README.md) to set up dedicated runners.
+[setup/misc/build_hammerdb.sh](setup/misc/build_hammerdb.sh) builds a
 HammerDB source checkout.
 
 ### Validation

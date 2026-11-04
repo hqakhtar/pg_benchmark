@@ -350,8 +350,12 @@ assert grep -Fq 'diset connection pg_host "mock-db.invalid"' \
     "$directory/iteration-1/workload.tcl"
 assert grep -Fq 'diset tpcc pg_citus_azure_elastic_cluster "true"' \
     "$directory/iteration-1/workload.tcl"
+assert grep -Fq 'diset tpcc pg_citus_loadbalancer "7432"' \
+    "$directory/iteration-1/workload.tcl"
 assert grep -Fq 'diset tpcc pg_raiseerror "true"' "$directory/iteration-1/workload.tcl"
 assert grep -Fq 'diset tpcc pg_storedprocs "false"' "$directory/iteration-1/workload.tcl"
+assert grep -Fq 'diset tpcc pg_rampup "0"' "$directory/iteration-1/workload.tcl"
+assert grep -Fq 'diset tpcc pg_duration "1"' "$directory/iteration-1/workload.tcl"
 assert grep -Fq '# diset tpcc pg_first_ware "1"' \
     "$directory/iteration-1/workload.tcl"
 assert grep -Fq '# diset connection pg_citus_direct_workers "true"' \

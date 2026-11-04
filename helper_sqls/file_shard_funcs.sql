@@ -73,7 +73,9 @@ END
 $$ LANGUAGE plpgsql;
 
 
--- Count distinct distribution values on each primary shard placement.
+-- Count distribution values directly on each primary shard placement.
+-- The supported benchmark tables have one row per distribution value:
+-- pgbench_accounts(aid) and warehouse(w_id).
 CREATE OR REPLACE FUNCTION benchmark_utils.get_dist_column_count_per_shard
 (
     table_name text,
@@ -88,36 +90,77 @@ RETURNS TABLE
 )
 AS
 $$
+DECLARE
+    v_table_regclass regclass;
+    v_dist_attnum smallint;
+    placement_result record;
 BEGIN
-    RETURN QUERY EXECUTE format
-    (
-        '
-        WITH shard_table AS
-        (
-            SELECT
-                n.nodename::text AS nodename,
-                n.nodeport::integer AS nodeport,
-                get_shard_id_for_distribution_column(%2$L, t.%1$I) AS shardid,
-                t.%1$I AS dist_value
-            FROM %2$I t
-            JOIN pg_dist_placement p
-              ON p.shardid = get_shard_id_for_distribution_column(%2$L, t.%1$I)
-            JOIN pg_dist_node n
-              ON n.groupid = p.groupid
-            WHERE n.noderole = ''primary''
-        )
+    v_table_regclass := table_name::regclass;
+
+    SELECT a.attnum
+    INTO v_dist_attnum
+    FROM pg_attribute a
+    WHERE a.attrelid = v_table_regclass
+      AND a.attname = distribution_column
+      AND a.attnum > 0
+      AND NOT a.attisdropped;
+
+    IF v_dist_attnum IS NULL
+    THEN
+        RAISE EXCEPTION
+            'Column % does not exist on table %',
+            distribution_column,
+            v_table_regclass;
+    END IF;
+
+    IF NOT EXISTS
+       (
+           SELECT 1
+           FROM pg_dist_partition p
+           WHERE p.logicalrelid = v_table_regclass
+       )
+    THEN
+        RAISE EXCEPTION 'Table % is not a distributed table', v_table_regclass;
+    END IF;
+
+    FOR placement_result IN
         SELECT
-            st.nodename,
-            st.nodeport,
-            st.shardid,
-            COUNT(DISTINCT st.dist_value)::bigint AS dist_value_count
-        FROM shard_table st
-        GROUP BY st.nodename, st.nodeport, st.shardid
-        ORDER BY st.nodename, st.nodeport, st.shardid
-        ',
-        distribution_column,
-        table_name
-    );
+            command_result.nodename,
+            command_result.nodeport,
+            command_result.shardid,
+            command_result.success,
+            command_result.result
+        FROM run_command_on_placements
+        (
+            v_table_regclass,
+            'SELECT count(*) FROM %s',
+            true
+        ) command_result
+        JOIN pg_dist_node n
+          ON n.nodename = command_result.nodename
+         AND n.nodeport = command_result.nodeport
+         AND n.noderole = 'primary'
+        ORDER BY
+            command_result.nodename,
+            command_result.nodeport,
+            command_result.shardid
+    LOOP
+        IF NOT placement_result.success
+        THEN
+            RAISE EXCEPTION
+                'Could not count distribution values for shard % on %.%: %',
+                placement_result.shardid,
+                placement_result.nodename,
+                placement_result.nodeport,
+                placement_result.result;
+        END IF;
+
+        nodename := placement_result.nodename;
+        nodeport := placement_result.nodeport;
+        shardid := placement_result.shardid;
+        dist_value_count := placement_result.result::bigint;
+        RETURN NEXT;
+    END LOOP;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -615,40 +658,54 @@ $$ LANGUAGE plpgsql;
 
 
 -- Show the current distribution and shard sizes.
+SELECT *
+FROM benchmark_utils.detect_benchmark_schema()
+\gset
+
+CREATE TEMP TABLE benchmark_dist_counts AS
 SELECT shard_counts.*
-FROM benchmark_utils.detect_benchmark_schema() config
-CROSS JOIN LATERAL benchmark_utils.get_dist_column_count_per_shard
+FROM benchmark_utils.get_dist_column_count_per_shard
 (
-    config.dist_table,
-    config.dist_column
-) shard_counts
+    :'dist_table',
+    :'dist_column'
+) shard_counts;
+
+SELECT shard_counts.*
+FROM pg_temp.benchmark_dist_counts shard_counts
 ORDER BY
     shard_counts.dist_value_count DESC,
     shard_counts.nodename,
     shard_counts.nodeport,
     shard_counts.shardid;
 
-SELECT node_counts.*
-FROM benchmark_utils.detect_benchmark_schema() config
-CROSS JOIN LATERAL benchmark_utils.get_dist_column_count_per_node
-(
-    config.dist_table,
-    config.dist_column
-) node_counts
+SELECT
+    shard_counts.nodename,
+    shard_counts.nodeport,
+    SUM(shard_counts.dist_value_count)::bigint AS dist_value_count
+FROM pg_temp.benchmark_dist_counts shard_counts
+GROUP BY
+    shard_counts.nodename,
+    shard_counts.nodeport
 ORDER BY
-    node_counts.dist_value_count DESC,
-    node_counts.nodename,
-    node_counts.nodeport;
+    dist_value_count DESC,
+    shard_counts.nodename,
+    shard_counts.nodeport;
 
+SELECT colocationid
+FROM pg_dist_partition
+WHERE logicalrelid = :'dist_table'::regclass
+\gset
+
+CREATE TEMP TABLE benchmark_shard_sizes AS
 SELECT shard_sizes.*
-FROM benchmark_utils.detect_benchmark_schema() config
-JOIN pg_dist_partition partition_info
-  ON partition_info.logicalrelid = config.dist_table::regclass
-CROSS JOIN LATERAL benchmark_utils.get_shard_size
+FROM benchmark_utils.get_shard_size
 (
     NULL,
-    partition_info.colocationid
-) shard_sizes
+    :colocationid
+) shard_sizes;
+
+SELECT shard_sizes.*
+FROM pg_temp.benchmark_shard_sizes shard_sizes
 ORDER BY
     shard_sizes.shard_size DESC,
     shard_sizes.nodename,
@@ -662,3 +719,19 @@ BEGIN
     RAISE NOTICE 'Run CALL benchmark_utils.rebalance_distribution_values_evenly() to rebalance distribution values.';
 END
 $$ LANGUAGE plpgsql;
+
+-- Summarize distribution values per shard.
+SELECT
+    MIN(dist_value_count) AS min_dist_value_count,
+    MAX(dist_value_count) AS max_dist_value_count,
+    ROUND(STDDEV_POP(dist_value_count), 2) AS stddev_dist_value_count,
+    ROUND(AVG(dist_value_count), 2) AS mean_dist_value_count
+FROM pg_temp.benchmark_dist_counts;
+
+-- Summarize shard sizes in bytes.
+SELECT
+    MIN(shard_size) AS min_shard_size,
+    MAX(shard_size) AS max_shard_size,
+    ROUND(STDDEV_POP(shard_size), 2) AS stddev_shard_size,
+    ROUND(AVG(shard_size), 2) AS mean_shard_size
+FROM pg_temp.benchmark_shard_sizes;

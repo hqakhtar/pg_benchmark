@@ -1,6 +1,5 @@
 ---
 # Runner VM setup playbook.
-# Mirrors setup_runner_ubuntu.sh declaratively.
 #
 # Usage (from setup/ansible, with the shared plain-text hosts file):
 #   ansible-playbook -i ../../hosts.txt runner_setup.yml
