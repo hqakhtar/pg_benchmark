@@ -33,6 +33,7 @@ Options:
   --host HOST             Select one VM for setup/updates (need not be listed)
   --check                 Validate runner and target settings without connecting
   --prepare               Prepare data without running iterations
+  --load                  Load HammerDB data in parallel on hosts.txt runners
   --cleanup               Remove benchmark data (requires destructive opt-in)
   --connection-env FILE    Select a complete private connection configuration
   --benchmark-env FILE     Select a complete private benchmark configuration
@@ -44,6 +45,9 @@ CONNECTION_ENV_FILE, BENCHMARK_ENV_FILE, and RUN_ENV_FILE.
 Without selectors, private connection.env, BENCHMARK/BENCHMARK.env, and run.env
 are required in this checkout. Copy the matching *.env.sample templates first.
 Files ending in .sample (including symlink targets) are never accepted.
+For hammerdb --load, set RUN_REMOTE_REPO in the selected run environment;
+the total warehouse count comes from HDB_WAREHOUSES. Initial cleanup requires
+RUN_ALLOW_DESTRUCTIVE=true. This action does not run benchmark iterations.
 For setup/updates, copy hosts.txt.sample to hosts.txt and edit it, or select --host.
 Run --setup-control-machine once to install missing control-machine tools.
 It does not configure runner VMs or install benchmark/database software.
@@ -64,6 +68,7 @@ Supported benchmarks:
 Examples:
   ./wrapper.sh hammerdb --check
   ./wrapper.sh hammerdb --prepare
+  ./wrapper.sh hammerdb --load --run-env ./run-load.env
   ./wrapper.sh hammerdb
   ./wrapper.sh --setup --host runner.example.com -- --check
 EOF
@@ -91,7 +96,7 @@ azure_options=()
 while (($#)); do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --setup-control-machine|--setup|--update-hammerdb|--update-config|--azure-create|--azure-delete|--check|--prepare|--cleanup)
+        --setup-control-machine|--setup|--update-hammerdb|--update-config|--azure-create|--azure-delete|--check|--prepare|--load|--cleanup)
             [[ "$action_set" == false ]] || usage_error "Choose only one action"
             RUN_ACTION="${1#--}"
             action_set=true
@@ -224,6 +229,19 @@ fi
 
 readonly BENCHMARK_TYPE RUN_ACTION
 export BENCHMARK_TYPE RUN_ACTION
+
+if [[ "$RUN_ACTION" == load ]]
+then
+    [[ "$BENCHMARK_TYPE" == hammerdb ]] || usage_error "--load is only supported for hammerdb"
+    loader="$FRAMEWORK_ROOT/setup/run_tpcc_load_multivm.sh"
+    [[ -f "$loader" && -r "$loader" ]] ||
+        { fail "Parallel loader must be a readable regular file: $loader"; exit 1; }
+    load_options=()
+    [[ -z "$connection_file" ]] || load_options+=(--connection-env "$connection_file")
+    [[ -z "$benchmark_file" ]] || load_options+=(--benchmark-env "$benchmark_file")
+    [[ -z "$run_file" ]] || load_options+=(--run-env "$run_file")
+    exec bash "$loader" "$FRAMEWORK_ROOT/hosts.txt" "${load_options[@]}"
+fi
 
 trap 'printf "ERROR: Configuration or runner failed at line %s (exit %s)\n" "$LINENO" "$?" >&2' ERR
 # Resolve configuration once; adapters receive the exported settings.

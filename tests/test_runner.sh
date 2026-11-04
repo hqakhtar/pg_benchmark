@@ -348,22 +348,36 @@ assert jq -e '.citus == true and .citus_azure_elastic_cluster == true' \
     "$directory/benchmark.json"
 assert grep -Fq 'diset connection pg_host "mock-db.invalid"' \
     "$directory/iteration-1/workload.tcl"
-assert grep -Fq 'diset tpcc pg_citus_azure_elastic_cluster "true"' \
+assert grep -Fq 'diset connection pg_azure_citus "true"' \
     "$directory/iteration-1/workload.tcl"
-assert grep -Fq 'diset tpcc pg_citus_loadbalancer "7432"' \
+assert grep -Fq 'diset connection pg_citus_loadbalancer "7432"' \
     "$directory/iteration-1/workload.tcl"
 assert grep -Fq 'diset tpcc pg_raiseerror "true"' "$directory/iteration-1/workload.tcl"
 assert grep -Fq 'diset tpcc pg_storedprocs "false"' "$directory/iteration-1/workload.tcl"
 assert grep -Fq 'diset tpcc pg_rampup "0"' "$directory/iteration-1/workload.tcl"
 assert grep -Fq 'diset tpcc pg_duration "1"' "$directory/iteration-1/workload.tcl"
-assert grep -Fq '# diset tpcc pg_first_ware "1"' \
+assert grep -Fq 'diset tpcc pg_first_ware "1"' \
     "$directory/iteration-1/workload.tcl"
-assert grep -Fq '# diset connection pg_citus_direct_workers "true"' \
+assert grep -Fq 'diset connection pg_citus_direct_workers "true"' \
     "$directory/iteration-1/workload.tcl"
 assert test "$(grep -Fc '$::env(' "$directory/iteration-1/workload.tcl")" == 2
 assert test "$(trace_count '^prepare|')" == 1
 assert test "$(trace_count '^run|')" == 1
 pass 'Azure Elastic Cluster settings configure preparation and execution metadata'
+
+EXTRA_ENV=("HDB_CITUS_COMPAT=true" "HDB_CITUS_AZURE_ELASTIC_CLUSTER=false"
+    "HDB_CITUS_LOADBALANCER_PORT=0" "HDB_CITUS_DIRECT_WORKERS=false"
+    "HDB_FIRST_WAREHOUSE=101" "HDB_WAREHOUSES=2")
+invoke hammerdb --prepare
+assert test "$status" == 0
+directory="$(last_run)"
+assert grep -Fxq 'diset tpcc pg_first_ware "101"' "$directory/prepare/workload.tcl"
+assert grep -Fxq 'diset tpcc pg_count_ware "2"' "$directory/prepare/workload.tcl"
+assert grep -Fxq 'diset connection pg_azure_citus "false"' "$directory/prepare/workload.tcl"
+assert grep -Fxq 'diset connection pg_citus_loadbalancer "0"' "$directory/prepare/workload.tcl"
+assert grep -Fxq 'diset connection pg_citus_direct_workers "false"' "$directory/prepare/workload.tcl"
+assert jq -e 'has("distributed_load") | not' "$directory/benchmark.json"
+pass 'warehouse ranges and disabled Azure/worker routing reach supported HammerDB dictionary keys'
 
 EXTRA_ENV=("HDB_CITUS_COMPAT=invalid")
 invoke hammerdb --check
@@ -442,17 +456,14 @@ directory="$(last_run)"
 assert jq -e '.status == "failed" and .completed_iterations == 0' "$directory/run.json"
 pass 'early logging failure cancels a blocked workload without a configured timeout'
 
-EXTRA_ENV=("HDB_WAREHOUSES=0" "HDB_DISTRIBUTED_LOAD=true")
+EXTRA_ENV=("HDB_WAREHOUSES=0")
 invoke hammerdb --prepare
 assert test "$status" == 0
 assert grep -q 'prepare|warehouses=0|first=1' "$TEST_ROOT/trace"
 EXTRA_ENV=("HDB_WAREHOUSES=0")
 invoke hammerdb --check
 assert test "$status" == 0
-EXTRA_ENV=("HDB_WAREHOUSES=0" "HDB_DISTRIBUTED_LOAD=true" "TEST_NO_RANGE_SUPPORT=1")
-invoke hammerdb --prepare
-assert test "$status" == 0
-pass 'zero-warehouse finalization delegates dictionary compatibility to HammerDB'
+pass 'zero-warehouse requests are forwarded without claiming source CLI finalization support'
 
 password="literal p'a\$ss[brackets]; word"
 EXTRA_ENV=("PGPASSWORD=$password" "RUN_ITERATIONS=1")

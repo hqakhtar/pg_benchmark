@@ -169,6 +169,10 @@ Existing servers need a `psql` client (`PG_PSQL`, default `psql`), **not**
 The main settings are `HAMMERDB_HOME`, `HDB_WAREHOUSES`, `HDB_BUILD_VUS`,
 `HDB_RUN_VUS`, `HDB_RAMPUP_MINUTES`, and `HDB_DURATION_MINUTES`.
 `HDB_BUILD_VUS` cannot exceed the warehouse count.
+For multithreaded builds, HammerDB adds a monitor to that worker count.
+`HDB_RUN_VUS` is the total timed-run VU count, including one monitor; use 401
+for 400 workload clients. The timed workload discovers its warehouse range from
+the database; `HDB_WAREHOUSES` controls preparation, not a run-time warehouse cap.
 
 - `HDB_WORKLOAD=tpcc` is the only supported workload.
 - `HDB_RESET_SCHEMA=false` means preparation does not drop existing data.
@@ -189,18 +193,29 @@ The main settings are `HAMMERDB_HOME`, `HDB_WAREHOUSES`, `HDB_BUILD_VUS`,
 Stock PostgreSQL HammerDB dictionaries work for ordinary non-Citus preparation
 and execution. `HDB_CITUS_COMPAT=true` enables Citus compatibility.
 `HDB_CITUS_AZURE_ELASTIC_CLUSTER=true` sets HammerDB's
-`pg_citus_azure_elastic_cluster`; use it together with Citus compatibility for
+`connection pg_azure_citus`; use it together with Citus compatibility for
 Azure Cosmos DB for PostgreSQL Elastic Clusters. The target database must
 already exist in this mode, and HammerDB does not try to change its owner.
-`HDB_CITUS_LOADBALANCER_PORT` selects the data connection port and defaults to
-`7432`. Set it to `0` to make HammerDB use `PGPORT`.
+`HDB_CITUS_LOADBALANCER_PORT` sets `connection pg_citus_loadbalancer`, default
+`7432`. With both Azure and Citus modes enabled, benchmark workers use that port;
+the monitor still uses `PGPORT`. Set it to `0` to retain `PGPORT`.
 
-The generated Tcl comments out the custom `pg_first_ware` and
-`pg_citus_direct_workers` settings because they are not present in the standard
-HammerDB dictionary shown by `print dict`. A custom distributed-loading build
-must restore those settings before using the multi-VM warehouse-range workflow.
-HammerDB reports unsupported settings when an operation runs; `--check` does
-not validate its dictionary.
+The adapter targets the local custom HammerDB 5.0 dictionary.
+`HDB_FIRST_WAREHOUSE` sets `tpcc pg_first_ware`: together with
+`HDB_WAREHOUSES`, it selects a preparation range beginning at that warehouse.
+`HDB_CITUS_DIRECT_WORKERS` sets `connection pg_citus_direct_workers` for
+placement-aware parallel Citus loading and requires runner access to worker
+endpoints. Bash continues to assign ranges for multi-runner preparation.
+The unused `HDB_DISTRIBUTED_LOAD` flag has been removed; it never selected a
+HammerDB loading phase.
+
+These configuration mappings do not fix multi-runner phase orchestration.
+The inspected source finalizes a bootstrap build immediately, and its public
+`buildschema` command rejects zero-warehouse finalization even though the
+internal PostgreSQL implementation recognizes it. The multi-VM loader needs
+compatible phase controls before end-to-end use; its mocked tests are not proof
+of real-source phase compatibility. There is no supported `pg_build_phase` key
+in the inspected dictionary. `--check` does not validate HammerDB's dictionary.
 
 ### Run policy
 
@@ -233,7 +248,7 @@ database. The runner never drops data merely because a run finished.
 ## Public interface
 
 ```text
-wrapper.sh BENCHMARK [--check | --prepare | --cleanup]
+wrapper.sh BENCHMARK [--check | --prepare | --load | --cleanup]
     [--connection-env FILE]
     [--benchmark-env FILE]
     [--run-env FILE]
@@ -491,20 +506,28 @@ the same three configuration groups, wrapper interface, and
 [shared runner hosts](#shared-runner-hosts).
 
 Configure `HAMMERDB_HOME` and `RUN_OUTPUT_ROOT` for the runner machines, use
-`PG_TARGET_MODE=existing`, and explicitly enable `RUN_ALLOW_DESTRUCTIVE=true`
-for the initial cleanup:
+`PG_TARGET_MODE=existing`, set `HDB_WAREHOUSES` to the total dataset size in the
+private benchmark environment, and set `RUN_REMOTE_REPO` to the absolute checkout
+path shared by all runners in the private run environment. For example, use
+`HDB_WAREHOUSES=2000` and `RUN_REMOTE_REPO=/home/azuresu/pg_benchmark`.
+Explicitly enable `RUN_ALLOW_DESTRUCTIVE=true` in a complete private loading
+run environment for the initial cleanup:
 
 ```bash
-./setup/run_tpcc_load_multivm.sh \
-  ./hosts.txt \
-  /opt/pg_benchmark \
-  1000000 \
-  --connection-env ./connection.env \
-  --benchmark-env ./hammerdb/hammerdb.env \
-  --run-env ./run.env
+./wrapper.sh hammerdb --load --run-env ./run-load.env
 ```
 
-The optional warehouse count otherwise comes from `HDB_WAREHOUSES`. The loader
+This loads data only, not benchmark iterations. The wrapper selects this
+checkout's `hosts.txt`, even when invoked from another directory; runner count
+comes from that list. Connection, benchmark, and run environment selectors
+and their environment-variable equivalents work as with other benchmark actions.
+The loader reads each selected configuration once. Ordinary `--prepare` still
+prepares only on the current machine.
+
+The direct script interface remains available:
+`setup/run_tpcc_load_multivm.sh HOSTS_FILE [REMOTE_REPO [TOTAL_WAREHOUSES]]`.
+Explicit positional values override `RUN_REMOTE_REPO` and `HDB_WAREHOUSES`.
+The loader
 checks runners before cleanup, bootstraps warehouse 1, partitions the remaining
 warehouses, then finalizes post-data DDL. A failed parallel job prevents
 finalization. Configuration is invocation-specific: the loader sends complete
@@ -512,6 +535,8 @@ private configurations over SSH stdin and does not rewrite shared runner files
 or depend on runtime defaults in the remote checkout. `.sample` selections are
 rejected before SSH. Request files are private and removed on completion;
 interrupted SSH connections still require checking the runner before retrying.
+The wrapper does not resolve the HammerDB bootstrap/finalization compatibility
+limitations described under [HammerDB settings](#hammerdb-settings).
 
 ## Output and failures
 

@@ -32,9 +32,10 @@ done
 ln -s "$ROOT/tests/fixtures/fake-ssh.sh" "$TEST_ROOT/bin/ssh"
 ln -s "$ROOT/tests/fixtures/fake-command.sh" "$TEST_ROOT/hammer db/hammerdbcli"
 REMOTE_REPO="$TEST_ROOT/remote repo'quoted"
-mkdir -p "$REMOTE_REPO/lib" "$REMOTE_REPO/hammerdb"
+mkdir -p "$REMOTE_REPO/lib" "$REMOTE_REPO/hammerdb" "$REMOTE_REPO/setup" "$TEST_ROOT/caller"
 cp -- "$ROOT/wrapper.sh" "$ROOT/connection.env.sample" "$ROOT/run.env.sample" "$REMOTE_REPO/"
 cp -- "$ROOT/lib/"*.sh "$REMOTE_REPO/lib/"
+cp -- "$ROOT/setup/run_tpcc_load_multivm.sh" "$REMOTE_REPO/setup/"
 cp -- "$ROOT/hammerdb/hammerdb.sh" "$ROOT/hammerdb/hammerdb.env.sample" \
     "$ROOT/hammerdb/hammerdb_cleanup_citus.sql" "$ROOT/hammerdb/hammerdb_maintenance_citus.sql" \
     "$REMOTE_REPO/hammerdb/"
@@ -70,6 +71,7 @@ EXTRA_ENV=("HDB_CITUS_COMPAT=true" "HDB_CITUS_AZURE_ELASTIC_CLUSTER=true"
 DEFAULT_CONFIG_ARGS=(--connection-env "$TEST_ROOT/connection.env"
     --benchmark-env "$TEST_ROOT/benchmark.env" --run-env "$TEST_ROOT/run.env")
 CONFIG_ARGS=("${DEFAULT_CONFIG_ARGS[@]}")
+WRAPPER_MODE=false
 passed=0
 
 assert()
@@ -88,10 +90,19 @@ invoke()
     : >"$TEST_ROOT/trace"
     : >"$TEST_ROOT/ssh-arguments"
     set +e
-    env -i "${BASE_ENV[@]}" "${EXTRA_ENV[@]}" \
-        bash "$ROOT/setup/run_tpcc_load_multivm.sh" \
-        "$TEST_ROOT/hosts" "$REMOTE_REPO" "$@" \
-        "${CONFIG_ARGS[@]}" >"$TEST_ROOT/current.log" 2>&1
+    if [[ "$WRAPPER_MODE" == true ]]
+    then
+        (
+            cd -- "$TEST_ROOT/caller"
+            env -i "${BASE_ENV[@]}" "${EXTRA_ENV[@]}" \
+                bash "$REMOTE_REPO/wrapper.sh" hammerdb --load "$@" "${CONFIG_ARGS[@]}"
+        ) >"$TEST_ROOT/current.log" 2>&1
+    else
+        env -i "${BASE_ENV[@]}" "${EXTRA_ENV[@]}" \
+            bash "$ROOT/setup/run_tpcc_load_multivm.sh" \
+            "$TEST_ROOT/hosts" "$REMOTE_REPO" "$@" \
+            "${CONFIG_ARGS[@]}" >"$TEST_ROOT/current.log" 2>&1
+    fi
     status=$?
     set -e
 }
@@ -146,6 +157,77 @@ fi
 assert grep -Fxq 'keep-shared-environment' "$REMOTE_REPO/myenv.sh"
 assert grep -Fxq 'keep-private-connection' "$REMOTE_REPO/connection.local.env"
 pass 'file-sourced credentials and explicit empty admin password survive private stdin configuration'
+
+cp -- "$TEST_ROOT/hosts" "$REMOTE_REPO/hosts.txt"
+printf 'not-the-checkout-host\n' >"$TEST_ROOT/caller/hosts.txt"
+printf 'export RUN_REMOTE_REPO=%q\n' "$REMOTE_REPO" >>"$TEST_ROOT/run.env"
+# shellcheck disable=SC2016
+printf 'printf "loaded\\n" >>"$TEST_ROOT/config-loads"\n' >>"$TEST_ROOT/run.env"
+WRAPPER_MODE=true
+EXTRA_ENV=("HDB_WAREHOUSES=10")
+invoke
+assert test "$status" == 0
+assert grep -q 'runner-c first=8 count=3 last=10' "$TEST_ROOT/current.log"
+assert grep -q '^prepare|warehouses=3|first=5|vus=3|host=runner-b|phase=data$' "$TEST_ROOT/trace"
+assert test "$(wc -l <"$TEST_ROOT/config-loads")" == 1
+if grep -q '^run|' "$TEST_ROOT/trace"
+then
+    printf 'Parallel loading started benchmark iterations\n' >&2
+    exit 1
+fi
+pass 'wrapper loads env-derived remote path and warehouse total once using checkout-relative hosts'
+
+for ((index = 1; index <= 20; index++)); do
+    printf 'runner-%02d\n' "$index"
+done >"$REMOTE_REPO/hosts.txt"
+EXTRA_ENV=("HDB_WAREHOUSES=2000")
+CONFIG_ARGS=()
+invoke
+assert test "$status" == 0
+assert test "$(grep -c '^ssh|.*|--check|preflight$' "$TEST_ROOT/trace")" == 20
+assert test "$(grep -c '^ssh|.*|--prepare|data$' "$TEST_ROOT/trace")" == 20
+assert grep -q 'runner-01 first=2 count=99 last=100' "$TEST_ROOT/current.log"
+assert grep -q 'runner-20 first=1901 count=100 last=2000' "$TEST_ROOT/current.log"
+assert awk -F'[|=]' '
+    $1 == "prepare" && ($NF == "bootstrap" || $NF == "data") { total += $3 }
+    END { if (total != 2000) exit 1 }
+' "$TEST_ROOT/trace"
+cp -- "$TEST_ROOT/hosts" "$REMOTE_REPO/hosts.txt"
+CONFIG_ARGS=("${DEFAULT_CONFIG_ARGS[@]}")
+pass 'wrapper environment selectors partition exactly 2000 warehouses across 20 runners without positional values'
+
+EXTRA_ENV=("HDB_WAREHOUSES=10" "TEST_FAIL_DATA_HOST=runner-b")
+invoke
+assert test "$status" != 0
+assert grep -q 'refusing post-data DDL' "$TEST_ROOT/current.log"
+pass 'wrapper parallel loading preserves orchestration failures'
+
+EXTRA_ENV=("HDB_WAREHOUSES=10")
+for option in --prepare --check --cleanup --setup --update-config
+do
+    invoke "$option"
+    assert test "$status" == 2
+    assert test ! -s "$TEST_ROOT/trace"
+done
+invoke --host runner-a
+assert test "$status" == 2
+assert test ! -s "$TEST_ROOT/trace"
+pass 'parallel load cannot be combined with other actions or setup-only host selection'
+
+cp -- "$TEST_ROOT/run.env" "$TEST_ROOT/no-remote.env"
+printf 'export RUN_REMOTE_REPO=""\n' >>"$TEST_ROOT/no-remote.env"
+CONFIG_ARGS=("${DEFAULT_CONFIG_ARGS[@]}" --run-env "$TEST_ROOT/no-remote.env")
+invoke
+assert test "$status" != 0
+assert grep -q 'Set RUN_REMOTE_REPO' "$TEST_ROOT/current.log"
+assert test ! -s "$TEST_ROOT/trace"
+CONFIG_ARGS=("${DEFAULT_CONFIG_ARGS[@]}")
+WRAPPER_MODE=false
+EXTRA_ENV=()
+invoke 3
+assert test "$status" == 0
+assert test "$(grep -c '^prepare|' "$TEST_ROOT/trace")" == 4
+pass 'missing remote path fails before SSH while legacy positional totals override environment defaults'
 
 EXTRA_ENV=("TEST_FAIL_PREFLIGHT_HOST=runner-b")
 invoke 10

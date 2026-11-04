@@ -21,7 +21,6 @@ benchmark_describe()
     printf '  "citus_loadbalancer_port": %s,\n' "$HDB_CITUS_LOADBALANCER_PORT"
     printf '  "citus_direct_workers": %s,\n' "$HDB_CITUS_DIRECT_WORKERS"
     printf '  "stored_procedures": %s,\n' "$HDB_STOREDPROCS"
-    printf '  "distributed_load": %s,\n' "$HDB_DISTRIBUTED_LOAD"
     printf '  "reset_schema": %s,\n' "$HDB_RESET_SCHEMA"
     printf '  "maintenance": %s,\n' "$HDB_MAINTENANCE"
     printf '  "vacuum": %s\n}\n' "$HDB_VACUUM"
@@ -50,7 +49,9 @@ dbset bm TPC-C
 diset connection pg_host $(tcl_literal "$PGHOST")
 diset connection pg_port $(tcl_literal "$PGPORT")
 diset connection pg_sslmode $(tcl_literal "$PGSSLMODE")
-# diset connection pg_citus_direct_workers $(tcl_literal "$HDB_CITUS_DIRECT_WORKERS")
+diset connection pg_azure_citus $(tcl_literal "$HDB_CITUS_AZURE_ELASTIC_CLUSTER")
+diset connection pg_citus_loadbalancer $(tcl_literal "$HDB_CITUS_LOADBALANCER_PORT")
+diset connection pg_citus_direct_workers $(tcl_literal "$HDB_CITUS_DIRECT_WORKERS")
 diset tpcc pg_dbase $(tcl_literal "$PGDATABASE")
 diset tpcc pg_defaultdbase $(tcl_literal "$PGMAINTENANCE_DB")
 diset tpcc pg_user $(tcl_literal "$PGUSER")
@@ -59,10 +60,8 @@ diset tpcc pg_superuser $(tcl_literal "$HDB_SUPERUSER")
 diset tpcc pg_superuserpass $::env(HDB_SUPERUSER_PASSWORD)
 diset tpcc pg_num_vu $(tcl_literal "$HDB_BUILD_VUS")
 diset tpcc pg_count_ware $(tcl_literal "$HDB_WAREHOUSES")
-# diset tpcc pg_first_ware $(tcl_literal "$HDB_FIRST_WAREHOUSE")
+diset tpcc pg_first_ware $(tcl_literal "$HDB_FIRST_WAREHOUSE")
 diset tpcc pg_cituscompat $(tcl_literal "$HDB_CITUS_COMPAT")
-diset tpcc pg_citus_azure_elastic_cluster $(tcl_literal "$HDB_CITUS_AZURE_ELASTIC_CLUSTER")
-diset tpcc pg_citus_loadbalancer $(tcl_literal "$HDB_CITUS_LOADBALANCER_PORT")
 diset tpcc pg_storedprocs $(tcl_literal "$HDB_STOREDPROCS")
 TCL
 

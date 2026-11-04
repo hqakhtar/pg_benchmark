@@ -1,11 +1,11 @@
 puts "HammerDB CLI v5.0-test"
 
 set configpostgresql [dict create \
-    connection [dict create pg_host "" pg_port "" pg_sslmode ""] \
+    connection [dict create pg_host "" pg_port "" pg_sslmode "" pg_azure_citus false \
+        pg_citus_loadbalancer 5432 pg_citus_direct_workers false] \
     tpcc [dict create pg_dbase "" pg_defaultdbase "" pg_user "" pg_superuser "" \
         pg_pass old-secret pg_superuserpass old-secret pg_num_vu 1 pg_count_ware 1 \
-        pg_cituscompat false pg_citus_azure_elastic_cluster false \
-        pg_citus_loadbalancer 0 pg_storedprocs false pg_driver timed pg_rampup 0 \
+        pg_first_ware 1 pg_cituscompat false pg_storedprocs false pg_driver timed pg_rampup 0 \
         pg_duration 1 pg_raiseerror false pg_vacuum false]]
 
 proc dbset {args} {}
@@ -36,10 +36,14 @@ proc run_phase {phase} {
         error "The adapter changed the canonical connection"
     }
     if {[dict get $::configpostgresql tpcc pg_cituscompat] ne $::env(HDB_CITUS_COMPAT) ||
-        [dict get $::configpostgresql tpcc pg_citus_azure_elastic_cluster] ne
+        [dict get $::configpostgresql connection pg_azure_citus] ne
             $::env(HDB_CITUS_AZURE_ELASTIC_CLUSTER) ||
-        [dict get $::configpostgresql tpcc pg_citus_loadbalancer] ne
+        [dict get $::configpostgresql connection pg_citus_loadbalancer] ne
             $::env(HDB_CITUS_LOADBALANCER_PORT) ||
+        [dict get $::configpostgresql connection pg_citus_direct_workers] ne
+            $::env(HDB_CITUS_DIRECT_WORKERS) ||
+        [dict get $::configpostgresql tpcc pg_first_ware] ne
+            $::env(HDB_FIRST_WAREHOUSE) ||
         [dict get $::configpostgresql tpcc pg_storedprocs] ne
             $::env(HDB_STOREDPROCS)} {
         error "Citus compatibility did not reach the HammerDB dictionaries"

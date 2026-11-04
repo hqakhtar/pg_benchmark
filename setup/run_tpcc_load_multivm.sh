@@ -7,7 +7,7 @@ source "$ROOT/lib/common.sh"
 usage()
 {
     cat <<'EOF'
-Usage: run_tpcc_load_multivm.sh HOSTS_FILE REMOTE_REPO [TOTAL_WAREHOUSES]
+Usage: run_tpcc_load_multivm.sh HOSTS_FILE [REMOTE_REPO [TOTAL_WAREHOUSES]]
     [--connection-env FILE] [--benchmark-env FILE] [--run-env FILE]
 
 Load the three configuration groups used by wrapper.sh hammerdb, check all
@@ -15,6 +15,7 @@ runners, clean up once, bootstrap warehouse 1, load disjoint warehouse ranges,
 then finalize post-data DDL. This does not run benchmark iterations.
 
 Requires PG_TARGET_MODE=existing and RUN_ALLOW_DESTRUCTIVE=true.
+REMOTE_REPO defaults to RUN_REMOTE_REPO from the selected run environment.
 TOTAL_WAREHOUSES defaults to HDB_WAREHOUSES; build VUs come from HDB_BUILD_VUS
 and are capped to each slice. HAMMERDB_HOME, PG_PSQL, PGPASSFILE (if used),
 and RUN_OUTPUT_ROOT are paths on the runners.
@@ -55,12 +56,17 @@ while (($#)); do
         *) arguments+=("$1"); shift ;;
     esac
 done
-[[ ${#arguments[@]} -ge 2 && ${#arguments[@]} -le 3 ]] || { usage >&2; exit 2; }
+[[ ${#arguments[@]} -ge 1 && ${#arguments[@]} -le 3 ]] || { usage >&2; exit 2; }
 
 load_configuration "$ROOT" hammerdb "$connection_file" "$benchmark_file" "$run_file"
 HOSTS_FILE="${arguments[0]}"
-REMOTE_REPO="${arguments[1]}"
+REMOTE_REPO="${arguments[1]:-${RUN_REMOTE_REPO:-}}"
 TOTAL_WAREHOUSES="${arguments[2]:-$HDB_WAREHOUSES}"
+[[ -n "$REMOTE_REPO" ]] ||
+{
+    fail "Set RUN_REMOTE_REPO in the selected run environment or pass REMOTE_REPO"
+    exit 1
+}
 validate_integer TOTAL_WAREHOUSES "$TOTAL_WAREHOUSES" 1
 validate_integer HDB_BUILD_VUS "$HDB_BUILD_VUS" 1
 [[ "$PG_TARGET_MODE" == existing ]] || { fail "Distributed loading requires PG_TARGET_MODE=existing"; exit 1; }
@@ -122,7 +128,7 @@ remote_request()
     local connection_payload benchmark_payload run_payload
     local -x HDB_FIRST_WAREHOUSE="$4" HDB_WAREHOUSES="$5" HDB_BUILD_VUS="$6"
     local -x HDB_RUN_VUS="$HDB_BUILD_VUS"
-    local -x HDB_DISTRIBUTED_LOAD=true HDB_RESET_SCHEMA=false
+    local -x HDB_RESET_SCHEMA=false
     local -x RUN_PREPARE_MODE=reuse RUN_ITERATIONS=1
     local -x RUN_OUTPUT_ROOT
     RUN_OUTPUT_ROOT="$WORK_ROOT/load-$BATCH_ID/$(safe_host "$local_host")/$phase"
@@ -134,7 +140,7 @@ remote_request()
         HDB_RAISEERROR \
         HDB_SUPERUSER HDB_SUPERUSER_PASSWORD HDB_CITUS_COMPAT \
         HDB_CITUS_AZURE_ELASTIC_CLUSTER HDB_CITUS_LOADBALANCER_PORT HDB_CITUS_DIRECT_WORKERS \
-        HDB_STOREDPROCS HDB_DISTRIBUTED_LOAD HDB_RESET_SCHEMA HDB_MAINTENANCE HDB_VACUUM)" || return 1
+        HDB_STOREDPROCS HDB_RESET_SCHEMA HDB_MAINTENANCE HDB_VACUUM)" || return 1
     run_payload="$(serialize_environment RUN_ITERATIONS RUN_OUTPUT_ROOT RUN_LABEL \
         RUN_PREPARE_MODE RUN_COOLDOWN_SECONDS RUN_TIMEOUT_SECONDS RUN_ALLOW_DESTRUCTIVE)" || return 1
     printf 'remote_repo=%q\nremote_action=%q\nrequest_phase=%q\n' "$REMOTE_REPO" "$action" "$phase" || return 1
