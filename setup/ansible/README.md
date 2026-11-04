@@ -104,7 +104,28 @@ from benchmark execution:
 ./wrapper.sh --setup --host NEW_VM
 ./wrapper.sh --setup -- --check
 ./wrapper.sh --setup --host NEW_VM -- -e @setup/ansible/vars.local.yml
+./wrapper.sh --update-hammerdb
+./wrapper.sh --update-hammerdb --host NEW_VM -- -e @setup/ansible/vars.local.yml
+./wrapper.sh --update-config
+./wrapper.sh --update-config --host NEW_VM -- --check
 ```
+
+For already provisioned runners, `--update-hammerdb` runs only the `hammerdb`
+tasks with `install_hammerdb=true` and `reinstall_hammerdb=true`. It validates
+the controller's `local_hammerdb_tarball`, copies and extracts it on the runners,
+and replaces the selected version even when its version number is unchanged.
+Stop active HammerDB runs before replacement. Other installed versions remain.
+`--check` validates the archive without removing or installing anything.
+
+`--update-config` runs only `benchmark_config` with
+`update_benchmark_config=true`. It uploads the local private `connection.env`,
+`hammerdb/hammerdb.env`, and `run.env` into the existing runner checkout,
+overwriting their contents with mode `0600` and suppressing secret output.
+Create and edit the private files first. Source selection can be customized
+using `benchmark_config_local_dir` and `benchmark_config_files`.
+Neither update action runs system provisioning or starts benchmarks. Both
+support the same `--host` and trailing Ansible options as `--setup`; those
+options can override the action defaults or add other task tags.
 
 `--setup-control-machine` only prepares the local provisioning tools and takes
 no extra arguments. It is not run implicitly by `--setup`.

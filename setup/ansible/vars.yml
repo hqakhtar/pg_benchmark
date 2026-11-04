@@ -6,7 +6,7 @@ pg_version: "17"
 
 # ── Remote user ───────────────────────────────────────────────────────────────
 # SSH defaults for provisioning; override in vars.local.yml if needed.
-ansible_user: azureuser
+ansible_user: azuresu
 ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new"
 
 # Home directory on the runner VMs (tasks that write dotfiles use this).
@@ -39,7 +39,7 @@ install_hammerdb: true
 reinstall_hammerdb: false
 # Match this to the archive's top-level directory. A custom tarball path does
 # not infer the version; mismatched contents fail preflight when installing.
-hammerdb_version: "6.1"
+hammerdb_version: "5.0"
 local_hammerdb_tarball: "/home/virus/sources/HammerDB/Build/BawtBuild/Linux/x64/Release/Distribution/HammerDB-{{ hammerdb_version }}-Prod-Linux.tar.gz"
 hammerdb_dir_name: "HammerDB-{{ hammerdb_version }}"
 hammerdb_archive_name: "{{ hammerdb_dir_name }}-Prod-Linux.tar.gz"

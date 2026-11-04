@@ -120,6 +120,8 @@ invoke --help
 assert test "$status" == 0
 assert grep -Fq -- '--setup [--host HOST]' "$TEST_ROOT/current.log"
 assert grep -Fq -- '--setup-control-machine' "$TEST_ROOT/current.log"
+assert grep -Fq -- '--update-hammerdb [--host HOST]' "$TEST_ROOT/current.log"
+assert grep -Fq -- '--update-config [--host HOST]' "$TEST_ROOT/current.log"
 assert test ! -e "$TEST_ROOT/ansible.argv"
 assert test ! -e "$TEST_ROOT/control.trace"
 pass 'help describes standalone setup without invoking Ansible or loading configs'
@@ -164,7 +166,57 @@ assert test ! -e "$CHECKOUT/hammerdb/hammerdb.env"
 assert test ! -e "$CHECKOUT/run.env"
 pass 'setup targets the checkout hosts file from any directory without benchmark environments'
 
+for action in update-hammerdb update-config
+do
+    if [[ "$action" == update-hammerdb ]]
+    then
+        action_options=(--tags hammerdb -e install_hammerdb=true -e reinstall_hammerdb=true)
+    else
+        action_options=(--tags benchmark_config -e update_benchmark_config=true)
+    fi
+    invoke "--$action"
+    assert test "$status" == 0
+    assert_invocation -i "$CHECKOUT/hosts.txt" "$CHECKOUT/setup/ansible/runner_setup.yml" "${action_options[@]}"
+
+    options=(--check -e "@private variables'quoted.yml")
+    invoke "--$action" --host new-runner -- "${options[@]}"
+    assert test "$status" == 0
+    assert_invocation -i new-runner, "$CHECKOUT/setup/ansible/runner_setup.yml" "${action_options[@]}" "${options[@]}"
+
+    for argument in hammerdb --setup --update-hammerdb --update-config --check --prepare --cleanup --setup-control-machine --azure-create --azure-delete
+    do
+        invoke "--$action" "$argument"
+        assert test "$status" == 2
+        assert test ! -e "$TEST_ROOT/ansible.argv"
+    done
+    for group in connection benchmark run
+    do
+        invoke "--$action" "--$group-env" "$TEST_ROOT/poison.env"
+        assert test "$status" == 2
+        assert test ! -e "$TEST_ROOT/ansible.argv"
+    done
+    invoke "--$action" --host 'runner-a,runner-b'
+    assert test "$status" != 0
+    assert test ! -e "$TEST_ROOT/ansible.argv"
+
+    EXTRA_ENV=("TEST_ANSIBLE_EXIT=47")
+    invoke "--$action" --host new-runner
+    assert test "$status" == 47
+    EXTRA_ENV=()
+done
+pass 'update actions select only their tasks, support hosts/options, reject mixed actions, and preserve failures'
+
 rm -- "$CHECKOUT/hosts.txt"
+for action in update-hammerdb update-config
+do
+    invoke "--$action"
+    assert test "$status" != 0
+    assert test ! -e "$TEST_ROOT/ansible.argv"
+    invoke "--$action" --host new-runner
+    assert test "$status" == 0
+done
+pass 'updates require a valid shared hosts file unless a single host is selected'
+
 invoke --setup --host new-runner.example
 assert test "$status" == 0
 assert_invocation -i new-runner.example, "$CHECKOUT/setup/ansible/runner_setup.yml"

@@ -239,6 +239,8 @@ wrapper.sh BENCHMARK [--check | --prepare | --cleanup]
     [--run-env FILE]
 wrapper.sh --setup-control-machine
 wrapper.sh --setup [--host HOST] [-- ANSIBLE_OPTIONS]
+wrapper.sh --update-hammerdb [--host HOST] [-- ANSIBLE_OPTIONS]
+wrapper.sh --update-config [--host HOST] [-- ANSIBLE_OPTIONS]
 ```
 
 No action flag means run. `--help` lists the interface. Only one action can be
@@ -660,8 +662,34 @@ caller's working directory:
 ./wrapper.sh --setup -- -e @setup/ansible/vars.local.yml
 
 # Explicitly replace the requested HammerDB installation on one VM only.
-./wrapper.sh --setup --host new-runner -- --tags hammerdb -e reinstall_hammerdb=true
+./wrapper.sh --update-hammerdb --host new-runner
+
+# Copy the local HammerDB archive and replace the selected version on all runners.
+./wrapper.sh --update-hammerdb -- -e @setup/ansible/vars.local.yml
+
+# Upload local private environment files to all runners.
+./wrapper.sh --update-config
+
+# Preview a configuration upload to just one runner.
+./wrapper.sh --update-config --host new-runner -- --check
 ```
+
+The update actions use the same host selection and Ansible option forwarding as
+`--setup`, without full provisioning, package upgrades, or service changes.
+`--update-hammerdb` selects only the `hammerdb` tasks and enables installation
+and explicit replacement: the local archive is validated, copied to each runner,
+and extracted after removing the selected version's existing directory, even
+for same-version rebuilds. Stop active HammerDB runs first. Configure
+`local_hammerdb_tarball` and `hammerdb_version` through private Ansible overrides;
+other installed versions are not removed.
+`--update-config` selects only `benchmark_config` and enables private uploads.
+It overwrites `connection.env`, `hammerdb/hammerdb.env`, and `run.env` in each
+runner's existing repository with mode `0600`, without logging their contents.
+Create and edit those local private files first; templates are never uploaded.
+Use `benchmark_config_local_dir` or `benchmark_config_files` in private Ansible
+overrides to select other sources. Neither action sources the environment files
+locally or starts a benchmark. Options after `--` can override action defaults;
+adding tags can select additional tasks.
 
 Before execution, the wrapper prints the complete, shell-escaped
 `ansible-playbook` command and its working directory. Copy that command to run

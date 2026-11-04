@@ -11,6 +11,8 @@ usage()
     cat <<'EOF'
 Usage: wrapper.sh BENCHMARK [OPTIONS]
        wrapper.sh --setup [--host HOST] [-- ANSIBLE_OPTIONS]
+       wrapper.sh --update-hammerdb [--host HOST] [-- ANSIBLE_OPTIONS]
+       wrapper.sh --update-config [--host HOST] [-- ANSIBLE_OPTIONS]
        wrapper.sh --setup-control-machine
        wrapper.sh --azure-create [-- AZURE_OPTIONS]
        wrapper.sh --azure-delete [-- AZURE_OPTIONS]
@@ -19,13 +21,16 @@ Load connection, benchmark, and run environments, then invoke the selected
 benchmark adapter. Only modules shipped in this checkout are supported.
 Setup instead provisions runner machines through Ansible, without loading
 benchmark environments or running a benchmark.
+Update actions run only the selected Ansible tasks on existing runners.
 
 Options:
   --setup-control-machine Install local provisioning tools (Ubuntu/Debian)
   --setup                 Provision all VMs in this checkout's hosts.txt
+  --update-hammerdb       Replace HammerDB from the local archive on runners
+  --update-config         Upload private connection, benchmark, and run env files
   --azure-create          Create Azure VMs and add aliases to hosts.txt
   --azure-delete          Delete Azure VMs and remove their aliases from hosts.txt
-  --host HOST             Provision just this VM (setup only; need not be listed)
+  --host HOST             Select one VM for setup/updates (need not be listed)
   --check                 Validate runner and target settings without connecting
   --prepare               Prepare data without running iterations
   --cleanup               Remove benchmark data (requires destructive opt-in)
@@ -39,10 +44,12 @@ CONNECTION_ENV_FILE, BENCHMARK_ENV_FILE, and RUN_ENV_FILE.
 Without selectors, private connection.env, BENCHMARK/BENCHMARK.env, and run.env
 are required in this checkout. Copy the matching *.env.sample templates first.
 Files ending in .sample (including symlink targets) are never accepted.
-For setup, copy hosts.txt.sample to hosts.txt and edit it, or select --host.
+For setup/updates, copy hosts.txt.sample to hosts.txt and edit it, or select --host.
 Run --setup-control-machine once to install missing control-machine tools.
 It does not configure runner VMs or install benchmark/database software.
-Ansible options go after --, for example: --setup -- --check
+Ansible options go after --, for example: --update-hammerdb -- --check
+HammerDB updates replace the selected version, including same-version rebuilds.
+Config updates overwrite private env files; edit local copies before uploading.
 The Ansible command is printed before execution. Keep secrets in private
 variable files, not inline arguments; use -e @FILE after --.
 Use dedicated runners: provisioning upgrades packages and stops PostgreSQL.
@@ -84,7 +91,7 @@ azure_options=()
 while (($#)); do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --setup-control-machine|--setup|--azure-create|--azure-delete|--check|--prepare|--cleanup)
+        --setup-control-machine|--setup|--update-hammerdb|--update-config|--azure-create|--azure-delete|--check|--prepare|--cleanup)
             [[ "$action_set" == false ]] || usage_error "Choose only one action"
             RUN_ACTION="${1#--}"
             action_set=true
@@ -113,9 +120,9 @@ while (($#)); do
         --)
             shift
             case "$RUN_ACTION" in
-                setup) ansible_options=("$@") ;;
+                setup|update-hammerdb|update-config) ansible_options=("$@") ;;
                 azure-create|azure-delete) azure_options=("$@") ;;
-                *) usage_error "Options after -- require --setup, --azure-create or --azure-delete" ;;
+                *) usage_error "Options after -- require --setup, --update-hammerdb, --update-config, --azure-create or --azure-delete" ;;
             esac
             break
             ;;
@@ -167,10 +174,10 @@ then
     exec bash "$control_setup"
 fi
 
-if [[ "$RUN_ACTION" == setup ]]
+if [[ "$RUN_ACTION" == setup || "$RUN_ACTION" == update-hammerdb || "$RUN_ACTION" == update-config ]]
 then
-    [[ -z "$BENCHMARK_TYPE" ]] || usage_error "--setup does not take a benchmark name; use --host for a single VM"
-    [[ "$config_selected" == false ]] || usage_error "--setup uses Ansible variables, not benchmark environment selectors"
+    [[ -z "$BENCHMARK_TYPE" ]] || usage_error "--$RUN_ACTION does not take a benchmark name; use --host for a single VM"
+    [[ "$config_selected" == false ]] || usage_error "--$RUN_ACTION uses Ansible variables, not benchmark environment selectors"
     require_command ansible-playbook ||
     {
         printf 'Run %q --setup-control-machine to install local provisioning tools first.\n' "$FRAMEWORK_ROOT/wrapper.sh" >&2
@@ -189,7 +196,16 @@ then
         read_runner_hosts "$inventory"
     fi
 
-    ansible_command=(ansible-playbook -i "$inventory" "$playbook" "${ansible_options[@]}")
+    action_options=()
+    case "$RUN_ACTION" in
+        update-hammerdb)
+            action_options=(--tags hammerdb -e install_hammerdb=true -e reinstall_hammerdb=true)
+            ;;
+        update-config)
+            action_options=(--tags benchmark_config -e update_benchmark_config=true)
+            ;;
+    esac
+    ansible_command=(ansible-playbook -i "$inventory" "$playbook" "${action_options[@]}" "${ansible_options[@]}")
     # Print reusable shell quoting, but execute the argument array directly.
     printf 'Ansible command (run from %q):\n' "$PWD"
     printf '%q' "${ansible_command[0]}"
@@ -198,7 +214,7 @@ then
     exec "${ansible_command[@]}"
 fi
 
-[[ -z "$setup_host" ]] || usage_error "--host is only valid with --setup"
+[[ -z "$setup_host" ]] || usage_error "--host is only valid with --setup, --update-hammerdb or --update-config"
 [[ -n "$BENCHMARK_TYPE" ]] ||
 {
     printf "ERROR: BENCHMARK is required. Supported benchmarks: hammerdb\n" >&2

@@ -103,7 +103,10 @@ assert grep -Fxq 'runner private settings' "$TEST_ROOT/runner/connection.env"
 pass 'private configuration upload remains opt-in'
 
 printf 'CONFIG_TEST_SECRET=synthetic-private-config-marker\n' >>"$TEST_ROOT/private/connection.env"
-invoke --tags benchmark_config -e update_benchmark_config=true
+jq 'del(.update_benchmark_config)' "$TEST_ROOT/vars.json" >"$TEST_ROOT/wrapper-vars.json"
+status=0
+bash "$ROOT/wrapper.sh" --update-config --host localhost -- \
+    -c local -e @"$TEST_ROOT/wrapper-vars.json" >"$TEST_ROOT/current.log" 2>&1 || status=$?
 assert test "$status" == 0
 for path in connection.env run.env hammerdb/hammerdb.env
 do
@@ -116,7 +119,8 @@ then
     exit 1
 fi
 
-pass 'opt-in uploads use default runtime paths, mode 0600, and suppress private contents'
+assert test ! -e "$TEST_ROOT/home"
+pass 'wrapper config updates upload all runtime paths with mode 0600, suppress secrets, and skip provisioning'
 
 cp -- "$TEST_ROOT/runner/connection.env" "$TEST_ROOT/original.env"
 printf 'CONFIG_TEST_SECRET=must-not-be-uploaded\n' >>"$TEST_ROOT/private/connection.env"

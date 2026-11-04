@@ -353,6 +353,19 @@ assert test ! -e "$target/old-only"
 assert grep -Fxq 'older version' "$CASE_ROOT/runners/localhost/HammerDB-4.9/preserved"
 pass 'explicit reinstall replaces only the selected version after successful preflight'
 
+start_case wrapper-update
+seed_install localhost
+cp -- "$TEST_ROOT/archives/replacement.tar.gz" "$CASE_ROOT/archives/localhost.tar.gz"
+status=0
+bash "$ROOT/wrapper.sh" --update-hammerdb --host localhost -- \
+    -c local -e @"$CASE_ROOT/vars.json" >"$TEST_ROOT/current.log" 2>&1 || status=$?
+assert test "$status" == 0
+assert_installed localhost replacement
+assert test ! -e "$CASE_ROOT/runners/localhost/$INSTALL_NAME/old-only"
+assert test ! -e "$HAMMERDB_TEST_EXECUTION_MARKER"
+assert test ! -e "$CASE_ROOT/runners/localhost/pg_benchmark"
+pass 'wrapper update copies the new local archive and replaces an existing same-version installation without provisioning'
+
 start_case incomplete
 inventory="missing-cli,empty-cli,nonexec-cli,linked-cli,linked-root,not-directory,"
 for host in missing-cli empty-cli nonexec-cli linked-cli linked-root not-directory
