@@ -347,6 +347,44 @@ its data directory only when `PG_REMOVE_DATA=true`. Failed/interrupted runs
 retain data and logs. Prepare-only rejects automatic data removal.
 Existing servers are never started or stopped.
 
+## Azure VM lifecycle
+
+The wrapper can create and delete Azure runner VMs without loading benchmark
+environment files. Install Azure CLI, Python 3, `jq`, and OpenSSH tools, run
+`az login`, and edit [Azure VM settings](setup/azure/azure-vms.env) first.
+
+```bash
+./wrapper.sh --azure-create -- --dry-run
+./wrapper.sh --azure-create
+./wrapper.sh --azure-delete -- --dry-run
+./wrapper.sh --azure-delete -- --interactive
+```
+
+Options after `--` are passed to the corresponding Azure script. The default
+settings file is `setup/azure/azure-vms.env` in this checkout; select another
+with `--env-file PATH` after `--`. Relative override paths use the caller's
+working directory.
+
+Creation adds each successfully created VM's name to this checkout's private
+`hosts.txt`, creating it if needed and avoiding duplicate entries. Existing
+hosts, comments, and blank lines are preserved. Deletion removes only selected
+VM aliases whose deletion or absence has been confirmed after approval;
+unrelated hosts and skipped/failed VM deletions are preserved. Updates happen
+per VM, so completed changes remain recorded if a later operation fails.
+Dry runs and cancelled deletions never change the hosts file.
+
+Keep `AZVM_UPDATE_SSH_CONFIG=true` and configure the matching local private key
+to make the VM names usable as SSH aliases. Keep Ansible's `ansible_user`
+consistent with `AZVM_ADMIN_USER`. VM creation does not run Ansible provisioning;
+use `./wrapper.sh --setup` afterward. Deleting all selected VMs can leave an
+empty hosts file, which setup rejects until new hosts are added.
+
+Hosts updates use atomic replacement and a persistent `hosts.txt.lock` beside
+the inventory to serialize concurrent updates. Both local files are ignored by
+Git. Direct use of the Azure scripts leaves inventory unchanged unless
+`--hosts-file PATH` is supplied. See the [Azure guide](setup/azure/README.txt)
+for resource cleanup, confirmations, and prerequisites.
+
 ## Shared runner hosts
 
 Keep one private `hosts.txt` in the repository root, with one runner hostname
@@ -678,6 +716,7 @@ bash tests/test_multivm.sh
 bash tests/test_setup.sh
 bash tests/test_control_machine_setup.sh
 bash tests/test_env_policy.sh
+PYTHONDONTWRITEBYTECODE=1 python3 tests/test_azure.py
 ```
 
 The setup suite uses a fake Ansible executable to verify target selection,
@@ -685,6 +724,10 @@ configuration isolation, argument forwarding, printed commands, and failures.
 The control-machine suite also mocks package managers and sudo; it checks
 missing-dependency installation, idempotence, privilege handling, and failure
 propagation without installing anything on the test machine.
+The Azure suite requires Python 3, `jq`, and `ssh-keygen`. It uses a fake Azure
+CLI and temporary SSH keys/configuration to test wrapper dispatch, inventory
+preservation, dry runs, confirmations, and partial failures. It does not contact
+Azure or modify the user's SSH configuration.
 
 The optional provisioning checks also require Ansible, `ansible.posix`, and
 `rsync`. They verify shared-host inventory parsing, playbook host selection,

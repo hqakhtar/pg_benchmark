@@ -12,6 +12,8 @@ usage()
 Usage: wrapper.sh BENCHMARK [OPTIONS]
        wrapper.sh --setup [--host HOST] [-- ANSIBLE_OPTIONS]
        wrapper.sh --setup-control-machine
+       wrapper.sh --azure-create [-- AZURE_OPTIONS]
+       wrapper.sh --azure-delete [-- AZURE_OPTIONS]
 
 Load connection, benchmark, and run environments, then invoke the selected
 benchmark adapter. Only modules shipped in this checkout are supported.
@@ -21,6 +23,8 @@ benchmark environments or running a benchmark.
 Options:
   --setup-control-machine Install local provisioning tools (Ubuntu/Debian)
   --setup                 Provision all VMs in this checkout's hosts.txt
+  --azure-create          Create Azure VMs and add aliases to hosts.txt
+  --azure-delete          Delete Azure VMs and remove their aliases from hosts.txt
   --host HOST             Provision just this VM (setup only; need not be listed)
   --check                 Validate runner and target settings without connecting
   --prepare               Prepare data without running iterations
@@ -42,6 +46,9 @@ Ansible options go after --, for example: --setup -- --check
 The Ansible command is printed before execution. Keep secrets in private
 variable files, not inline arguments; use -e @FILE after --.
 Use dedicated runners: provisioning upgrades packages and stops PostgreSQL.
+Azure actions use setup/azure/azure-vms.env by default. Override with
+--env-file PATH after --; other Azure script options also go after --.
+Existing hosts are preserved. Dry runs never change hosts.txt.
 See README.md for examples.
 
 Supported benchmarks:
@@ -72,11 +79,12 @@ action_set=false
 config_selected=false
 setup_host=""
 ansible_options=()
+azure_options=()
 
 while (($#)); do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --setup-control-machine|--setup|--check|--prepare|--cleanup)
+        --setup-control-machine|--setup|--azure-create|--azure-delete|--check|--prepare|--cleanup)
             [[ "$action_set" == false ]] || usage_error "Choose only one action"
             RUN_ACTION="${1#--}"
             action_set=true
@@ -103,9 +111,12 @@ while (($#)); do
             shift 2
             ;;
         --)
-            [[ "$RUN_ACTION" == setup ]] || usage_error "Ansible options after -- require --setup"
             shift
-            ansible_options=("$@")
+            case "$RUN_ACTION" in
+                setup) ansible_options=("$@") ;;
+                azure-create|azure-delete) azure_options=("$@") ;;
+                *) usage_error "Options after -- require --setup, --azure-create or --azure-delete" ;;
+            esac
             break
             ;;
         -*) usage_error "Unknown option '$1' (see --help)" ;;
@@ -116,6 +127,28 @@ while (($#)); do
             ;;
     esac
 done
+
+if [[ "$RUN_ACTION" == azure-create || "$RUN_ACTION" == azure-delete ]]
+then
+    [[ -z "$BENCHMARK_TYPE" && -z "$setup_host" && "$config_selected" == false ]] ||
+        usage_error "Azure actions take no benchmark, host, or benchmark environment selectors"
+    azure_script="$FRAMEWORK_ROOT/setup/azure/${RUN_ACTION#azure-}-azure-vms.sh"
+    [[ -f "$azure_script" && -r "$azure_script" ]] ||
+        { fail "Azure VM script must be a readable regular file: $azure_script"; exit 1; }
+    azure_env_selected=false
+    for option in "${azure_options[@]}"
+    do
+        case "$option" in
+            --env-file|--env-file=*) azure_env_selected=true ;;
+            --hosts-file|--hosts-file=*) usage_error "Azure wrapper actions always use this checkout's hosts.txt" ;;
+        esac
+    done
+    if [[ "$azure_env_selected" == false ]]
+    then
+        azure_options=(--env-file "$FRAMEWORK_ROOT/setup/azure/azure-vms.env" "${azure_options[@]}")
+    fi
+    exec bash "$azure_script" --hosts-file "$FRAMEWORK_ROOT/hosts.txt" "${azure_options[@]}"
+fi
 
 if [[ "$RUN_ACTION" == setup-control-machine ]]
 then
