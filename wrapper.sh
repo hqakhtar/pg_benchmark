@@ -10,6 +10,7 @@ usage()
 {
     cat <<'EOF'
 Usage: wrapper.sh BENCHMARK [OPTIONS]
+       wrapper.sh --monitor [DIR ...] [--run-env FILE] [-- MONITOR_OPTIONS]
        wrapper.sh --setup [--host HOST] [-- ANSIBLE_OPTIONS]
        wrapper.sh --update-hammerdb [--host HOST] [-- ANSIBLE_OPTIONS]
        wrapper.sh --update-config [--host HOST] [-- ANSIBLE_OPTIONS]
@@ -30,6 +31,7 @@ Options:
   --update-config         Upload private connection, benchmark, and run env files
   --azure-create          Create Azure VMs and add aliases to hosts.txt
   --azure-delete          Delete Azure VMs and remove their aliases from hosts.txt
+  --monitor               Watch load/run directories for worker failures
   --host HOST             Select one VM for setup/updates (need not be listed)
   --check                 Validate runner and target settings without connecting
   --prepare               Prepare data without running iterations
@@ -60,6 +62,11 @@ Use dedicated runners: provisioning upgrades packages and stops PostgreSQL.
 Azure actions use setup/azure/azure-vms.env by default. Override with
 --env-file PATH after --; other Azure script options also go after --.
 Existing hosts are preserved. Dry runs never change hosts.txt.
+Monitoring is read-only and needs Python 3. Without directories it reads the
+selected run environment and picks the newest matching local load/run directory.
+Explicit directories bypass configuration; historical failures also trigger it.
+Monitor options go after --, for example: --monitor ./logs/load-ID -- --interval 1
+It exits 1 on a worker failure or 2 on a monitor error; Ctrl-C stops watching.
 See README.md for examples.
 
 Supported benchmarks:
@@ -92,11 +99,14 @@ config_selected=false
 setup_host=""
 ansible_options=()
 azure_options=()
+monitor_directories=()
+monitor_options=()
+monitor_target_config_selected=false
 
 while (($#)); do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --setup-control-machine|--setup|--update-hammerdb|--update-config|--azure-create|--azure-delete|--check|--prepare|--load|--cleanup)
+        --setup-control-machine|--setup|--update-hammerdb|--update-config|--azure-create|--azure-delete|--monitor|--check|--prepare|--load|--cleanup)
             [[ "$action_set" == false ]] || usage_error "Choose only one action"
             RUN_ACTION="${1#--}"
             action_set=true
@@ -115,8 +125,8 @@ while (($#)); do
             }
 
             case "$1" in
-                --connection-env) connection_file="$2" ;;
-                --benchmark-env) benchmark_file="$2" ;;
+                --connection-env) connection_file="$2"; monitor_target_config_selected=true ;;
+                --benchmark-env) benchmark_file="$2"; monitor_target_config_selected=true ;;
                 --run-env) run_file="$2" ;;
             esac
             config_selected=true
@@ -127,18 +137,55 @@ while (($#)); do
             case "$RUN_ACTION" in
                 setup|update-hammerdb|update-config) ansible_options=("$@") ;;
                 azure-create|azure-delete) azure_options=("$@") ;;
-                *) usage_error "Options after -- require --setup, --update-hammerdb, --update-config, --azure-create or --azure-delete" ;;
+                monitor) monitor_options=("$@") ;;
+                *) usage_error "Options after -- require --setup, --update-hammerdb, --update-config, --azure-create, --azure-delete or --monitor" ;;
             esac
             break
             ;;
         -*) usage_error "Unknown option '$1' (see --help)" ;;
         *)
-            [[ -z "$BENCHMARK_TYPE" ]] || usage_error "Unexpected argument: $1"
-            BENCHMARK_TYPE="$1"
+            if [[ "$RUN_ACTION" == monitor ]]
+            then
+                monitor_directories+=("$1")
+            else
+                [[ -z "$BENCHMARK_TYPE" ]] || usage_error "Unexpected argument: $1"
+                BENCHMARK_TYPE="$1"
+            fi
             shift
             ;;
     esac
 done
+
+if [[ "$RUN_ACTION" == monitor ]]
+then
+    [[ -z "$BENCHMARK_TYPE" && -z "$setup_host" && "$monitor_target_config_selected" == false ]] ||
+        usage_error "--monitor takes optional directories and --run-env, not a benchmark, host, or target configuration"
+    if ((${#monitor_directories[@]} == 0))
+    then
+        load_environment "${run_file:-$FRAMEWORK_ROOT/run.env}"
+        [[ -n "${RUN_OUTPUT_ROOT:-}" && -n "${RUN_LABEL:-}" ]] ||
+            { fail "Monitoring requires RUN_OUTPUT_ROOT and RUN_LABEL in the selected run environment"; exit 1; }
+        if [[ -n "${LOG_DIR:-}" ]]
+        then
+            monitor_directories=("$LOG_DIR")
+        else
+            monitor_options=(
+                --run-output-root "$RUN_OUTPUT_ROOT"
+                --run-label "$RUN_LABEL"
+                --load-log-root "${RUN_LOAD_LOG_ROOT:-./logs}"
+                "${monitor_options[@]}"
+            )
+        fi
+    elif [[ "$config_selected" == true ]]
+    then
+        usage_error "--run-env is only used when --monitor selects the directory automatically"
+    fi
+    require_command python3 || exit 1
+    monitor_script="$FRAMEWORK_ROOT/monitor_workers.py"
+    [[ -f "$monitor_script" && -r "$monitor_script" ]] ||
+        { fail "Worker monitor must be a readable regular file: $monitor_script"; exit 1; }
+    exec python3 "$monitor_script" "${monitor_directories[@]}" "${monitor_options[@]}"
+fi
 
 if [[ "$RUN_ACTION" == azure-create || "$RUN_ACTION" == azure-delete ]]
 then

@@ -584,6 +584,103 @@ configuration and virtual users. The runner stops subsequent iterations and
 retains the logs. Interruptions terminate the adapter's owned process group and
 record an interrupted run.
 
+### Watch for worker failures in another terminal
+
+Use `--monitor` with Python 3 on the machine that can read the logs. With no
+directory argument it reads the current run configuration:
+
+```bash
+./wrapper.sh --monitor
+# Use the same alternate run configuration as the workload, if applicable.
+./wrapper.sh --monitor --run-env ./run-load.env
+```
+
+`--run-env` overrides `RUN_ENV_FILE`; otherwise the checkout's private `run.env`
+is used. No connection or HammerDB environment is needed. The monitor searches
+`RUN_OUTPUT_ROOT` for run directories matching `RUN_LABEL`, and
+`RUN_LOAD_LOG_ROOT` (default `./logs`) for local `load-*` directories. Both the
+loader and monitor use that log-root setting. An exact `LOG_DIR` override in
+the configuration or environment takes precedence over automatic selection.
+Relative paths resolve from the caller's working directory, as when running
+the workload. On the control machine, `RUN_OUTPUT_ROOT` may refer to a remote
+path; only locally visible directories are searched.
+
+Automatic selection chooses the newest matching directory by its timestamp,
+prints the selected path, and locks onto it without switching to later runs.
+It reports an error if no matching directory exists. A completed run can also
+be selected; this does not prove that the selected run is still active.
+Use separate output/log roots or explicit directories for concurrent workloads.
+
+To bypass configuration and select a particular distributed load, pass the
+exact `Log directory:` printed by `--load`:
+
+```bash
+./wrapper.sh --monitor ./logs/load-<timestamp>-<unique-suffix>
+```
+
+For preparation or benchmarking, run it on the runner and pass the specific
+run directory shown in the `Starting ...; log:` output under `RUN_OUTPUT_ROOT`:
+
+```bash
+./wrapper.sh --monitor /path/to/benchmark-results/benchmark-<timestamp>-<unique-suffix>
+```
+
+Replace the placeholder paths with existing directories. Explicit paths do not
+load runtime configuration and cannot be combined with `--run-env`.
+Multiple directories
+can be supplied to monitor several runs visible on the same filesystem.
+Avoid passing all of `logs/` or `RUN_OUTPUT_ROOT`: historical failures would
+trigger the monitor immediately.
+
+The monitor scans existing logs from the beginning, then reads only appended
+content, discovering new phase/iteration logs recursively every two seconds.
+It detects HammerDB `Error in Virtual User` / `FINISHED FAILED` messages,
+PostgreSQL errors, SSH connection/authentication failures, and nonzero exit
+codes in `.log.status`, `status.json`, and `run.json`. This can catch a failed
+VU while HammerDB's monitor is still waiting, even if HammerDB has not exited.
+It prints the first failure's runner, phase, path, log line number (for logs),
+and diagnostic to standard error, then exits **1**. For distributed loading,
+the runner is the SSH alias/log label in `PHASE.RUNNER.log` or
+`PHASE.RUNNER.log.status`; dots in runner names are preserved. Other artifacts
+without a runner in their filename explicitly report the runner as unknown.
+Progress-message carriage returns and terminal control characters are escaped
+so they cannot overwrite the runner or file information:
+
+```text
+WORKER FAILURE:
+Runner: runner-13
+Phase: data
+Source: /path/to/logs/load-ID/data.runner-13.log:42:
+Diagnostic: Vuser 131:Connection to database failed ...
+```
+
+An unreadable file or persistently malformed
+status file exits **2** rather than silently leaving a gap in monitoring.
+
+Pass monitor options after `--`:
+
+```bash
+./wrapper.sh --monitor ./logs/load-ID -- --interval 1 --failure-pattern 'worker disappeared'
+```
+
+`--failure-pattern` adds a site-specific diagnostic (repeatable,
+case-insensitive). The standalone interface is also available as
+`python3 monitor_workers.py DIR [DIR ...] [--interval 1]`.
+Log matching is
+conservative: any standalone `error`, `fatal`, `panic`, `failed`, or `aborted`
+word is treated as a failure, even in an otherwise successful run.
+
+This is a read-only alarm: it does **not** stop local or remote workloads.
+After an alarm, interrupt the original command and inspect the named worker;
+after SSH loss, remote completion is still unknown. It keeps watching on
+success; stop it with Ctrl-C (exit **130**). Automatic selection needs only the
+run environment; explicit directories need no runtime configuration.
+Credentials, SSH access, and third-party Python packages are not needed.
+Only artifacts visible to the monitor can be checked: a silent hang, a killed
+process that writes no status, or buffered/unavailable remote output cannot
+be reliably detected from logs alone. There is deliberately no idle timeout,
+since a healthy warehouse load can be quiet for a long time.
+
 ## Adapter contract
 
 [wrapper.sh](wrapper.sh) selects and loads a module for benchmark actions.
@@ -778,6 +875,7 @@ bash tests/test_setup.sh
 bash tests/test_control_machine_setup.sh
 bash tests/test_env_policy.sh
 PYTHONDONTWRITEBYTECODE=1 python3 tests/test_azure.py
+PYTHONDONTWRITEBYTECODE=1 python3 tests/test_monitor_workers.py
 ```
 
 The setup suite uses a fake Ansible executable to verify target selection,

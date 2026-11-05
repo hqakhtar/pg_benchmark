@@ -22,7 +22,8 @@ and are capped to each slice. HAMMERDB_HOME, PG_PSQL, PGPASSFILE (if used),
 and RUN_OUTPUT_ROOT are paths on the runners.
 
 Optional pilot settings:
-  LOG_DIR   Local orchestration log directory (default: a unique logs/load-*).
+  LOG_DIR   Exact local orchestration log directory (overrides the log root).
+  RUN_LOAD_LOG_ROOT  Parent for unique load-* directories (default: ./logs).
   SSH_OPTS  Additional whitespace-separated SSH arguments (not shell code).
 
 Use the matching CONNECTION_ENV_FILE, BENCHMARK_ENV_FILE, RUN_ENV_FILE
@@ -94,8 +95,9 @@ then
     LOG_DIR="$(absolute_path "$LOG_DIR")"
     mkdir -p -- "$LOG_DIR"
 else
-    mkdir -p ./logs
-    LOG_DIR="$(absolute_path ./logs)/load-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+    load_log_root="${RUN_LOAD_LOG_ROOT:-./logs}"
+    mkdir -p -- "$load_log_root"
+    LOG_DIR="$(absolute_path "$load_log_root")/load-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
     mkdir -- "$LOG_DIR"
 fi
 

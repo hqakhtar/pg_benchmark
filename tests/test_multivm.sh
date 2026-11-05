@@ -168,6 +168,15 @@ assert grep -Fxq 'keep-shared-environment' "$REMOTE_REPO/myenv.sh"
 assert grep -Fxq 'keep-private-connection' "$REMOTE_REPO/connection.local.env"
 pass 'file-sourced credentials and explicit empty admin password survive private stdin configuration'
 
+EXTRA_ENV=("LOG_DIR=" "RUN_LOAD_LOG_ROOT=$TEST_ROOT/custom load logs")
+invoke 10
+assert test "$status" == 0
+load_directory="$(find "$TEST_ROOT/custom load logs" -mindepth 1 -maxdepth 1 -type d -print)"
+assert test -d "$load_directory"
+assert test -f "$load_directory/data.runner-b.log.status"
+assert grep -Fq "Log directory: $load_directory" "$TEST_ROOT/current.log"
+pass 'configured load log root contains the unique orchestration directory'
+
 cp -- "$TEST_ROOT/hosts" "$REMOTE_REPO/hosts.txt"
 printf 'not-the-checkout-host\n' >"$TEST_ROOT/caller/hosts.txt"
 printf 'export RUN_REMOTE_REPO=%q\n' "$REMOTE_REPO" >>"$TEST_ROOT/run.env"
