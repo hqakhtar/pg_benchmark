@@ -339,6 +339,42 @@ assert test "$(trace_count '^prepare|')" == 1
 assert test "$(trace_count '^run|')" == 2
 pass 'prepare once and run twice using stock non-Citus dictionaries'
 
+directory="$(last_run)"
+assert jq -e '.user_delay_ms == 1' "$directory/benchmark.json"
+for stage in prepare iteration-1 iteration-2
+do
+    assert grep -Fxq 'giset virtual_user_options user_delay "1"' "$directory/$stage/workload.tcl"
+    assert grep -Fxq 'vuset delay "1"' "$directory/$stage/workload.tcl"
+done
+pass 'the default virtual-user launch delay preserves the existing one-millisecond setting'
+
+for delay in 500 0 0050
+do
+    EXTRA_ENV=("HDB_USER_DELAY_MS=$delay" "RUN_PREPARE_MODE=once" "RUN_ITERATIONS=1")
+    invoke hammerdb
+    assert test "$status" == 0
+    directory="$(last_run)"
+    normalized_delay="$((10#$delay))"
+    assert jq -e ".user_delay_ms == $normalized_delay" "$directory/benchmark.json"
+    for stage in prepare iteration-1
+    do
+        assert grep -Fxq "giset virtual_user_options user_delay \"$normalized_delay\"" \
+            "$directory/$stage/workload.tcl"
+        assert grep -Fxq "vuset delay \"$normalized_delay\"" "$directory/$stage/workload.tcl"
+    done
+done
+pass 'configured launch delays reach preparation, timed runs, and numeric metadata'
+
+for delay in '' -1 0.5 invalid 2147483648
+do
+    EXTRA_ENV=("HDB_USER_DELAY_MS=$delay")
+    invoke hammerdb --check
+    assert test "$status" != 0
+    assert grep -Fq 'HDB_USER_DELAY_MS must be an integer' "$TEST_ROOT/current.log"
+    assert test ! -s "$TEST_ROOT/trace"
+done
+pass 'invalid launch delays fail offline before starting native tools'
+
 EXTRA_ENV=("HDB_CITUS_COMPAT=true" "HDB_CITUS_AZURE_ELASTIC_CLUSTER=true"
     "RUN_PREPARE_MODE=once" "RUN_ITERATIONS=1")
 invoke hammerdb

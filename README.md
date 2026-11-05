@@ -81,9 +81,10 @@ default. Preparation does not implicitly delete existing tables.
 
 `--check` is an **offline framework preflight**: it validates the selected
 configuration files, runner policy, and PostgreSQL target settings. It does not
-validate HammerDB settings or executables, connect to PostgreSQL, start
+validate HammerDB dictionary settings or executables, connect to PostgreSQL, start
 HammerDB, create run output, or verify server privileges/native tool features.
-HammerDB configuration errors are left to HammerDB when an operation runs.
+The framework validates `HDB_USER_DELAY_MS`; other HammerDB configuration
+errors are left to HammerDB when an operation runs.
 
 ## Three configuration groups
 
@@ -175,6 +176,16 @@ for 400 workload clients. The timed workload discovers its warehouse range from
 the database; `HDB_WAREHOUSES` controls preparation, not a run-time warehouse cap.
 
 - `HDB_WORKLOAD=tpcc` is the only supported workload.
+- `HDB_USER_DELAY_MS` sets the delay between virtual-user launches in
+  milliseconds for both preparation and timed runs. It maps to HammerDB's
+  `user_delay` / `vuset delay`, not transaction pacing or cooldown. The default
+  is `1`, preserving existing behavior, including for older private configs
+  without the setting. Set `export HDB_USER_DELAY_MS="500"` in the selected
+  HammerDB environment to spread connection establishment over time.
+  The value must be an integer from `0` to `2147483647`; `0` disables the delay.
+  It is forwarded to every distributed loader and recorded as `user_delay_ms`
+  in `benchmark.json`. This spaces connections per runner, not across runners;
+  it does not reduce the final worker count or fix persistent DNS problems.
 - `HDB_RESET_SCHEMA=false` means preparation does not drop existing data.
 - `HDB_RESET_SCHEMA=true` resets before preparation and also requires
   `RUN_ALLOW_DESTRUCTIVE=true`.

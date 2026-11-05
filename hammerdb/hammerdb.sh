@@ -5,6 +5,7 @@ HDB_MODULE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Keep the field list explicit so credentials never enter this metadata.
 benchmark_describe()
 {
+    validate_integer HDB_USER_DELAY_MS "${HDB_USER_DELAY_MS-1}" 0 || return 1
     printf '{\n'
     json_field workload "$HDB_WORKLOAD"
     json_field installation "$HAMMERDB_HOME"
@@ -13,6 +14,7 @@ benchmark_describe()
     printf '  "first_warehouse": %s,\n' "$HDB_FIRST_WAREHOUSE"
     printf '  "build_vus": %s,\n' "$HDB_BUILD_VUS"
     printf '  "run_vus": %s,\n' "$HDB_RUN_VUS"
+    printf '  "user_delay_ms": %s,\n' "$HDB_USER_DELAY_MS"
     printf '  "rampup_minutes": %s,\n' "$HDB_RAMPUP_MINUTES"
     printf '  "duration_minutes": %s,\n' "$HDB_DURATION_MINUTES"
     printf '  "raise_error": %s,\n' "$HDB_RAISEERROR"
@@ -69,8 +71,8 @@ TCL
     then
         cat >>"$destination" <<TCL
 giset virtual_user_options virtual_users $(tcl_literal "$HDB_BUILD_VUS")
-giset virtual_user_options user_delay 1
-vuset delay 1
+giset virtual_user_options user_delay $(tcl_literal "$HDB_USER_DELAY_MS")
+vuset delay $(tcl_literal "$HDB_USER_DELAY_MS")
 buildschema
 vudestroy
 TCL
@@ -82,8 +84,8 @@ diset tpcc pg_duration $(tcl_literal "$HDB_DURATION_MINUTES")
 diset tpcc pg_raiseerror $(tcl_literal "$HDB_RAISEERROR")
 diset tpcc pg_vacuum $(tcl_literal "$HDB_VACUUM")
 giset virtual_user_options virtual_users $(tcl_literal "$HDB_RUN_VUS")
-giset virtual_user_options user_delay 1
-vuset delay 1
+giset virtual_user_options user_delay $(tcl_literal "$HDB_USER_DELAY_MS")
+vuset delay $(tcl_literal "$HDB_USER_DELAY_MS")
 vuset logtotemp 1
 loadscript
 vuset vu $(tcl_literal "$HDB_RUN_VUS")

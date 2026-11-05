@@ -45,6 +45,7 @@ printf '# Runners\r\nrunner-a\r\n# Disabled runner\r\nrunner-b\r\nrunner-c\r\n' 
 cp -- "$ROOT/hammerdb/hammerdb.env.sample" "$TEST_ROOT/benchmark.env"
 cp -- "$ROOT/run.env.sample" "$TEST_ROOT/run.env"
 printf "export HDB_SUPERUSER_PASSWORD=''\n" >>"$TEST_ROOT/benchmark.env"
+printf 'export HDB_USER_DELAY_MS=500\n' >>"$TEST_ROOT/benchmark.env"
 printf 'export RUN_ALLOW_DESTRUCTIVE=true\n' >>"$TEST_ROOT/run.env"
 password=$'literal password \'"$[brackets];\nsecond line'
 {
@@ -137,6 +138,13 @@ assert test "$(grep -c '^ssh|.*|--check|preflight$' "$TEST_ROOT/trace")" == 3
 for host in runner-a runner-b runner-c
 do
     assert grep -Fq '"citus": true,' "$TEST_ROOT/logs/preflight.$host.log"
+    assert grep -Fq '"user_delay_ms": 500,' "$TEST_ROOT/logs/preflight.$host.log"
+done
+for workload in "$TEST_ROOT/results"/load-*/*/*/*/prepare/workload.tcl
+do
+    assert test -f "$workload"
+    assert grep -Fxq 'giset virtual_user_options user_delay "500"' "$workload"
+    assert grep -Fxq 'vuset delay "500"' "$workload"
 done
 # shellcheck disable=SC2016
 assert awk -F'|' '
