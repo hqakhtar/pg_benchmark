@@ -140,6 +140,29 @@ The printed command is visible in terminal output and captured logs: pass
 sensitive variables with `-e @private-vars-file` (for example the ignored
 `-e @setup/ansible/vars.local.yml` above), not inline secret values.
 
+### Runner file-descriptor limits
+
+Apply only the limit configuration to existing runners from the checkout root:
+
+```bash
+./wrapper.sh --setup -- --tags hammerdb_limits
+```
+
+The playbook sets `runner_user`'s soft open-file limit to `65536` and hard
+limit to `1048576`, applies them through installed SSH and local-login PAM
+services, and verifies new SSH, `su`, and `sudo -i` sessions. Keep that user
+consistent with the account used by the loader's SSH aliases. Existing
+HammerDB processes, shells, and screen/tmux servers retain their previous
+limits; start a fresh session and workload after updating.
+
+The local probes print two separate `HAMMERDB_NOFILE_*` lines using a single
+command. Their YAML scalars deliberately fold to one line: `sudo -i` escapes
+embedded command newlines, which can concatenate separate shell statements
+and produce a false verification failure. If an earlier run reported
+`HAMMERDB_NOFILE_SOFT=65536printf`, update the checkout and rerun the tagged
+command above. The limit configuration may already have been applied; the
+rerun still requires the exact expected values rather than bypassing checks.
+
 ## Private configuration
 
 The checkout contains `*.env.sample` templates only. Copy them to private `.env`

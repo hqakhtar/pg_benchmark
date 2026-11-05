@@ -909,4 +909,9 @@ no remote runners are contacted or provisioned:
 bash tests/test_shared_hosts.sh
 bash tests/test_env_ansible.sh
 bash tests/test_hammerdb_ansible.sh
+PYTHONDONTWRITEBYTECODE=1 python3 tests/test_runner_limits.py
 ```
+
+The login-limit probe tests additionally use Python 3 and PyYAML (an Ansible
+dependency). They reproduce `sudo -i` command escaping with stubbed limit
+values; they never run sudo, edit PAM, or change the test machine's limits.

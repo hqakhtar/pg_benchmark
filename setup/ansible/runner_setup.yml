@@ -298,12 +298,135 @@
 
     # ── Shell limits ───────────────────────────────────────────────────────────
 
-    - name: Raise open-file limit in ~/.bashrc
-      become_user: "{{ runner_user }}"
-      lineinfile:
-        path: "{{ runner_home }}/.bashrc"
-        line: "ulimit -n 65536"
-        create: true
+    - name: Configure HammerDB runner file-descriptor limits
+      become: true
+      tags:
+        - hammerdb_limits
+      block:
+
+        - name: Remove the old interactive-shell limit setting
+          ansible.builtin.lineinfile:
+            path: "{{ runner_home }}/.bashrc"
+            regexp: '^\s*ulimit\s+-n\s+65536\s*$'
+            state: absent
+
+        - name: Configure persistent limits for the runner user
+          ansible.builtin.copy:
+            dest: /etc/security/limits.d/99-hammerdb.conf
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              # Managed by Ansible: HammerDB runner limits
+              {{ runner_user }} soft nofile 65536
+              {{ runner_user }} hard nofile 1048576
+
+        - name: Find installed SSH and local login PAM services
+          ansible.builtin.stat:
+            path: "/etc/pam.d/{{ item }}"
+            follow: true
+          loop:
+            - sshd
+            - login
+            - su
+            - su-l
+            - sudo
+            - sudo-i
+          register: hammerdb_pam_services
+
+        - name: Apply the same runner limits to SSH and local logins
+          ansible.builtin.blockinfile:
+            path: "/etc/pam.d/{{ item.item }}"
+            marker: "# {mark} ANSIBLE MANAGED HAMMERDB LIMITS"
+            insertafter: EOF
+            create: false
+            block: |
+              session required pam_limits.so conf=/etc/security/limits.d/99-hammerdb.conf
+          loop: "{{ hammerdb_pam_services.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          when: item.stat.exists
+
+        - name: Reconnect Ansible to obtain the new session limits
+          ansible.builtin.meta: reset_connection
+
+        - name: Read limits from the SSH user without sudo
+          become: false
+          ansible.builtin.command:
+            argv:
+              - /bin/bash
+              - -c
+              - |
+                ulimit -Sn
+                ulimit -Hn
+          register: hammerdb_session_limits
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Verify the new SSH session has sufficient limits
+          ansible.builtin.assert:
+            that:
+              - (hammerdb_session_limits.stdout_lines[0] | int) == 65536
+              - (hammerdb_session_limits.stdout_lines[1] | int) == 1048576
+            success_msg: >-
+              SSH session limits verified:
+              soft={{ hammerdb_session_limits.stdout_lines[0] }},
+              hard={{ hammerdb_session_limits.stdout_lines[1] }}.
+            fail_msg: >-
+              The SSH session did not inherit the expected file-descriptor
+              limits. Check that sshd has UsePAM yes and that another
+              limits configuration is not overriding 99-hammerdb.conf.
+              Observed limits: {{ hammerdb_session_limits.stdout_lines }}
+          when: not ansible_check_mode
+
+        - name: Read runner limits through local su and sudo logins
+          ansible.builtin.command:
+            argv: "{{ item.argv }}"
+          loop:
+            - name: su
+              argv:
+                - /usr/bin/su
+                - --login
+                - --shell
+                - /bin/bash
+                - --command
+                - >-
+                  printf 'HAMMERDB_NOFILE_SOFT=%s\nHAMMERDB_NOFILE_HARD=%s\n'
+                  "$(ulimit -Sn)" "$(ulimit -Hn)"
+                - "{{ runner_user }}"
+            - name: sudo
+              argv:
+                - /usr/bin/sudo
+                - -n
+                - -i
+                - -u
+                - "{{ runner_user }}"
+                - /bin/bash
+                - -c
+                - >-
+                  printf 'HAMMERDB_NOFILE_SOFT=%s\nHAMMERDB_NOFILE_HARD=%s\n'
+                  "$(ulimit -Sn)" "$(ulimit -Hn)"
+          loop_control:
+            label: "{{ item.name }}"
+          register: hammerdb_local_session_limits
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Verify local logins have the same limits as SSH
+          ansible.builtin.assert:
+            that:
+              - "'HAMMERDB_NOFILE_SOFT=65536' in item.stdout_lines"
+              - "'HAMMERDB_NOFILE_HARD=1048576' in item.stdout_lines"
+            success_msg: >-
+              Local {{ item.item.name }} login limits verified for
+              {{ runner_user }}: soft=65536, hard=1048576.
+            fail_msg: >-
+              Local {{ item.item.name }} login limits differ from the
+              expected runner limits: {{ item.stdout_lines }}.
+          loop: "{{ hammerdb_local_session_limits.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+          when: not ansible_check_mode
 
     # ── pg_benchmark repo ──────────────────────────────────────────────────────
 
