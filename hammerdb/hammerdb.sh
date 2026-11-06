@@ -5,6 +5,12 @@ HDB_MODULE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Keep the field list explicit so credentials never enter this metadata.
 benchmark_describe()
 {
+    if [[ "$RUN_ACTION" == verify ]]
+    then
+        validate_integer HDB_WAREHOUSES "$HDB_WAREHOUSES" 1 || return 1
+        validate_integer HDB_FIRST_WAREHOUSE "$HDB_FIRST_WAREHOUSE" 1 || return 1
+    fi
+
     validate_integer HDB_USER_DELAY_MS "${HDB_USER_DELAY_MS-1}" 0 || return 1
     printf '{\n'
     json_field workload "$HDB_WORKLOAD"
@@ -130,6 +136,14 @@ benchmark_cleanup()
             fail "Schema cleanup failed; see $directory/cleanup.log"
             return 1
         }
+}
+
+benchmark_verify()
+{
+    postgresql_exec "$PGDATABASE" "$PGUSER" \
+        --set=first_warehouse="$HDB_FIRST_WAREHOUSE" \
+        --set=expected_warehouses="$HDB_WAREHOUSES" \
+        -f "$HDB_MODULE_DIR/../helper_sqls/verify_tpcc_warehouses.sql"
 }
 
 benchmark_prepare()

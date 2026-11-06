@@ -2,6 +2,12 @@
 
 postgresql_validate()
 {
+    if [[ "$RUN_ACTION" == verify && "$PG_TARGET_MODE" != existing ]]
+    then
+        fail "Verification requires PG_TARGET_MODE=existing"
+        return 1
+    fi
+
     [[ -n "$PGHOST" && -n "$PGDATABASE" && -n "$PGUSER" && -n "$PGMAINTENANCE_DB" ]] ||
     {
         fail "PGHOST, PGDATABASE, PGUSER, and PGMAINTENANCE_DB must not be empty"

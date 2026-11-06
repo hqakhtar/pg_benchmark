@@ -12,7 +12,7 @@ module="$1"
 hook="$2"
 directory="$3"
 case "$hook" in
-    benchmark_prepare|benchmark_run|benchmark_cleanup) ;;
+    benchmark_prepare|benchmark_run|benchmark_cleanup|benchmark_verify) ;;
     *) fail "Unknown adapter operation: $hook"; exit 2 ;;
 esac
 # shellcheck source=/dev/null

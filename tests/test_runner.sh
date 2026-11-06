@@ -415,6 +415,72 @@ assert grep -Fxq 'diset connection pg_citus_direct_workers "false"' "$directory/
 assert jq -e 'has("distributed_load") | not' "$directory/benchmark.json"
 pass 'warehouse ranges and disabled Azure/worker routing reach supported HammerDB dictionary keys'
 
+EXTRA_ENV=("HDB_WAREHOUSES=00005" "HDB_FIRST_WAREHOUSE=00101"
+    "HAMMERDB_HOME=/deliberately/missing/HammerDB" "RUN_PREPARE_MODE=each"
+    "HDB_RESET_SCHEMA=true" "HDB_MAINTENANCE=true" "RUN_ALLOW_DESTRUCTIVE=false")
+invoke --verify
+assert test "$status" == 0
+directory="$(last_run)"
+assert grep -Fxq 'verify|first=101|warehouses=5' "$TEST_ROOT/trace"
+assert test "$(trace_count '^psql|')" == 2
+assert test "$(trace_count '^prepare|')" == 0
+assert test "$(trace_count '^run|')" == 0
+assert test "$(trace_count 'file=hammerdb_cleanup_citus.sql')" == 0
+assert test "$(trace_count 'file=hammerdb_maintenance_citus.sql')" == 0
+assert test -f "$directory/verify/output.log"
+assert jq -e '.action == "verify" and .status == "succeeded" and .completed_iterations == 0' \
+    "$directory/run.json"
+assert jq -e '.exit_code == 0' "$directory/verify/status.json"
+assert jq -e '.warehouses == 5 and .first_warehouse == 101' "$directory/benchmark.json"
+pass 'verify shorthand normalizes warehouse ranges and never prepares, cleans up, maintains, or runs HammerDB'
+
+EXTRA_ENV=()
+invoke hammerdb --verify --connection-env "$TEST_ROOT/selected-connection.env" \
+    --benchmark-env "$TEST_ROOT/selected-benchmark.env" --run-env "$TEST_ROOT/selected-run.env"
+assert test "$status" == 0
+directory="$(last_run)"
+assert grep -q '^psql|database=selected_db|user=selected_user|file=verify_tpcc_warehouses.sql|' \
+    "$TEST_ROOT/trace"
+assert grep -Fxq 'verify|first=1|warehouses=2' "$TEST_ROOT/trace"
+assert jq -e '.database == "selected_db" and .user == "selected_user"' "$directory/target.json"
+pass 'explicit verify action uses all three configuration selectors and the workload role'
+
+EXTRA_ENV=("TEST_SQL_FILE_FAIL=$ROOT/hammerdb/../helper_sqls/verify_tpcc_warehouses.sql")
+invoke hammerdb --verify
+assert test "$status" == 39
+directory="$(last_run)"
+assert jq -e '.action == "verify" and .status == "failed"' "$directory/run.json"
+assert jq -e '.exit_code == 39' "$directory/verify/status.json"
+pass 'verification SQL failures propagate to operation and persistent run status'
+
+for setting in HDB_WAREHOUSES HDB_FIRST_WAREHOUSE
+do
+    for value in 0 -1 1.5 invalid 2147483648
+    do
+        EXTRA_ENV=("$setting=$value")
+        invoke --verify
+        assert test "$status" != 0
+        assert grep -Fq "$setting must be an integer" "$TEST_ROOT/current.log"
+        assert test ! -s "$TEST_ROOT/trace"
+    done
+done
+pass 'invalid verification ranges fail before connecting to PostgreSQL'
+
+EXTRA_ENV=("PG_TARGET_MODE=temporary" "PGHOST=127.0.0.1" "RUN_PREPARE_MODE=once")
+invoke --verify
+assert test "$status" != 0
+assert grep -Fq 'Verification requires PG_TARGET_MODE=existing' "$TEST_ROOT/current.log"
+assert test ! -s "$TEST_ROOT/trace"
+EXTRA_ENV=()
+for action in --prepare --load --cleanup --check
+do
+    invoke --verify "$action"
+    assert test "$status" == 2
+    assert grep -Fq 'Choose only one action' "$TEST_ROOT/current.log"
+    assert test ! -s "$TEST_ROOT/trace"
+done
+pass 'verification cannot create a temporary cluster or combine with another action'
+
 EXTRA_ENV=("HDB_CITUS_COMPAT=invalid")
 invoke hammerdb --check
 assert test "$status" == 0

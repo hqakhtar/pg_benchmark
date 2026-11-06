@@ -244,7 +244,7 @@ In the run template, `RUN_ITERATIONS` defaults to 3. `RUN_OUTPUT_ROOT` defaults 
 `./benchmark-results`; `RUN_LABEL` supplies the human-readable part of each
 unique run ID. `RUN_COOLDOWN_SECONDS` defaults to 0.
 `RUN_TIMEOUT_SECONDS=0` disables the timeout; a positive value bounds each
-adapter operation, including preparation and cleanup.
+adapter operation, including preparation, verification, and cleanup.
 
 Schema cleanup is separate from stopping processes:
 
@@ -259,10 +259,11 @@ database. The runner never drops data merely because a run finished.
 ## Public interface
 
 ```text
-wrapper.sh BENCHMARK [--check | --prepare | --load | --cleanup]
+wrapper.sh BENCHMARK [--check | --prepare | --load | --verify | --cleanup]
     [--connection-env FILE]
     [--benchmark-env FILE]
     [--run-env FILE]
+wrapper.sh --verify [--connection-env FILE] [--benchmark-env FILE] [--run-env FILE]
 wrapper.sh --setup-control-machine
 wrapper.sh --setup [--host HOST] [-- ANSIBLE_OPTIONS]
 wrapper.sh --update-hammerdb [--host HOST] [-- ANSIBLE_OPTIONS]
@@ -557,6 +558,52 @@ interrupted SSH connections still require checking the runner before retrying.
 The wrapper does not resolve the HammerDB bootstrap/finalization compatibility
 limitations described under [HammerDB settings](#hammerdb-settings).
 
+## Verifying warehouse coverage
+
+After every loader has finished successfully, check for gaps or overlaps in
+parallel warehouse assignment:
+
+```bash
+./wrapper.sh --verify
+# Equivalent explicit adapter selection:
+./wrapper.sh hammerdb --verify --run-env ./run-load.env
+```
+
+Verification reads `public.warehouse` through the configured PostgreSQL query
+endpoint (the logical distributed table for Citus, not an individual shard).
+It requires `PG_TARGET_MODE=existing` and uses `PGUSER`, not `HDB_SUPERUSER`.
+The same three private configuration files and selectors apply; HammerDB
+itself does not run or need to be installed on the verification machine.
+
+The expected IDs are `HDB_FIRST_WAREHOUSE` through
+`HDB_FIRST_WAREHOUSE + HDB_WAREHOUSES - 1`, inclusive. Both settings must be
+positive integers. The check reports the expected range, actual row count,
+missing IDs, duplicate rows, and unexpected rows (including null IDs).
+It uses exact counts of the warehouse table only, not statistics estimates.
+Missing, duplicate, or unexpected IDs fail the command with a nonzero exit.
+
+This is a **warehouse coverage check**, not a full data-integrity or
+finalization check. It relies on successful loader completion and worker logs
+for loading the other TPC-C tables; it does not scan customer, stock, orders,
+or order lines, or validate indexes and stored procedures. Run it after
+loading has stopped. It never cleans up, prepares data, performs maintenance,
+or runs benchmark iterations, regardless of the run's preparation policy.
+Output is retained in `verify/output.log` inside the reported run directory,
+with the normal operation and run status files.
+
+The standalone psql helper is
+[helper_sqls/verify_tpcc_warehouses.sql](helper_sqls/verify_tpcc_warehouses.sql).
+With your libpq connection settings already configured:
+
+```bash
+psql -X -v expected_warehouses=100000 -v first_warehouse=1 \
+    -f helper_sqls/verify_tpcc_warehouses.sql
+```
+
+`expected_warehouses` is required; `first_warehouse` defaults to `1`.
+The helper uses a read-only transaction and enables `ON_ERROR_STOP`, so a
+failed coverage check also makes standalone psql exit nonzero.
+
 ## Output and failures
 
 Each operation creates a new private directory under `RUN_OUTPUT_ROOT`:
@@ -708,6 +755,7 @@ second CLI.
 | `benchmark_prepare DIRECTORY` | Prepare the dataset, including any tool-specific distributed phase |
 | `benchmark_run DIRECTORY` | Run one iteration and write a validated `result.json` |
 | `benchmark_cleanup DIRECTORY` | Explicitly remove benchmark objects after checking permission |
+| `benchmark_verify DIRECTORY` | Read-only warehouse coverage check; return nonzero on any discrepancy |
 
 Loading a module defines its functions; it must not execute a benchmark or
 reload environment files. Execution hooks run in supervised child processes
@@ -875,7 +923,8 @@ PostgreSQL client, and a compatible HammerDB installation. Temporary local
 targets additionally need PostgreSQL server tools.
 
 The regression suites use stubbed native commands and never contact databases
-or runners. They require Bash, Tcl (`tclsh`), and `jq` in addition to the normal
+or runners, except for the explicit local SQL integration test below.
+They require Bash, Tcl (`tclsh`), and `jq` in addition to the normal
 shell utilities. The environment-policy suite additionally uses isolated local
 Git repositories; it never pushes:
 
@@ -887,6 +936,16 @@ bash tests/test_control_machine_setup.sh
 bash tests/test_env_policy.sh
 PYTHONDONTWRITEBYTECODE=1 python3 tests/test_azure.py
 PYTHONDONTWRITEBYTECODE=1 python3 tests/test_monitor_workers.py
+```
+
+The warehouse SQL integration test creates and stops its own temporary local
+PostgreSQL server, uses a SELECT-only role, and tests both the SQL helper and
+the wrapper against complete, missing, duplicate, and unexpected warehouse IDs.
+It never contacts a configured benchmark database. Point `PG_CONFIG` at a
+local PostgreSQL installation with server tools:
+
+```bash
+PG_CONFIG=/path/to/postgresql/bin/pg_config bash tests/test_verify_sql.sh
 ```
 
 The setup suite uses a fake Ansible executable to verify target selection,

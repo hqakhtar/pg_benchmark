@@ -31,7 +31,7 @@ runner_validate()
         require_command "$command"
     done
     # Check the adapter contract before creating any run output.
-    for hook in benchmark_prepare benchmark_run benchmark_cleanup benchmark_describe; do
+    for hook in benchmark_prepare benchmark_run benchmark_cleanup benchmark_verify benchmark_describe; do
         declare -F "$hook" >/dev/null ||
         {
             fail "Benchmark module does not implement $hook"
@@ -223,6 +223,10 @@ runner_main()
         cleanup)
             postgresql_record_metadata
             runner_stage benchmark_cleanup "$RUN_DIRECTORY/cleanup"
+            ;;
+        verify)
+            postgresql_record_metadata
+            runner_stage benchmark_verify "$RUN_DIRECTORY/verify"
             ;;
         run)
             if [[ "$RUN_PREPARE_MODE" == once ]];

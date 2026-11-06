@@ -14,12 +14,14 @@ case "$name" in
         exec "$TEST_TCLSH" "$TEST_PROJECT_ROOT/tests/fixtures/hammerdb-cli.tcl" "$2"
         ;;
     psql)
-        database="" user="" sql_file="" query=""
+        database="" user="" sql_file="" query="" first_warehouse="" expected_warehouses=""
         error_stop=false
         while (($#)); do
             case "$1" in
                 --dbname=*) database="${1#*=}" ;;
                 --username=*) user="${1#*=}" ;;
+                --set=first_warehouse=*) first_warehouse="${1#--set=first_warehouse=}" ;;
+                --set=expected_warehouses=*) expected_warehouses="${1#--set=expected_warehouses=}" ;;
                 -f) sql_file="$2"; shift ;;
                 -Atc) query="$2"; shift ;;
                 ON_ERROR_STOP=1) error_stop=true ;;
@@ -34,6 +36,12 @@ case "$name" in
         then
             [[ -r "$sql_file" ]] || exit 66
             [[ "${TEST_SQL_FILE_FAIL:-}" != "$sql_file" ]] || exit 39
+            if [[ "${sql_file##*/}" == verify_tpcc_warehouses.sql ]]
+            then
+                printf 'verify|first=%s|warehouses=%s\n' \
+                    "$first_warehouse" "$expected_warehouses" >>"$TEST_TRACE"
+            fi
+
         elif [[ "$query" == 'SHOW server_version' ]];
         then
             printf '17.42-test-server\n'

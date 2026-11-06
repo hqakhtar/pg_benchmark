@@ -10,6 +10,7 @@ usage()
 {
     cat <<'EOF'
 Usage: wrapper.sh BENCHMARK [OPTIONS]
+       wrapper.sh --verify [--connection-env FILE] [--benchmark-env FILE] [--run-env FILE]
        wrapper.sh --monitor [DIR ...] [--run-env FILE] [-- MONITOR_OPTIONS]
        wrapper.sh --setup [--host HOST] [-- ANSIBLE_OPTIONS]
        wrapper.sh --update-hammerdb [--host HOST] [-- ANSIBLE_OPTIONS]
@@ -36,6 +37,7 @@ Options:
   --check                 Validate runner and target settings without connecting
   --prepare               Prepare data without running iterations
   --load                  Load HammerDB data in parallel on hosts.txt runners
+  --verify                Check HammerDB warehouse ID coverage without changing data
   --cleanup               Remove benchmark data (requires destructive opt-in)
   --connection-env FILE    Select a complete private connection configuration
   --benchmark-env FILE     Select a complete private benchmark configuration
@@ -50,6 +52,9 @@ Files ending in .sample (including symlink targets) are never accepted.
 For hammerdb --load, set RUN_REMOTE_REPO in the selected run environment;
 the total warehouse count comes from HDB_WAREHOUSES. Initial cleanup requires
 RUN_ALLOW_DESTRUCTIVE=true. This action does not run benchmark iterations.
+Verification defaults to hammerdb when no benchmark is supplied. It checks
+HDB_FIRST_WAREHOUSE through HDB_FIRST_WAREHOUSE + HDB_WAREHOUSES - 1 on an
+existing target, not the contents of the other TPC-C tables.
 For setup/updates, copy hosts.txt.sample to hosts.txt and edit it, or select --host.
 Run --setup-control-machine once to install missing control-machine tools.
 It does not configure runner VMs or install benchmark/database software.
@@ -76,6 +81,7 @@ Examples:
   ./wrapper.sh hammerdb --check
   ./wrapper.sh hammerdb --prepare
   ./wrapper.sh hammerdb --load --run-env ./run-load.env
+  ./wrapper.sh --verify
   ./wrapper.sh hammerdb
   ./wrapper.sh --setup --host runner.example.com -- --check
 EOF
@@ -106,7 +112,7 @@ monitor_target_config_selected=false
 while (($#)); do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --setup-control-machine|--setup|--update-hammerdb|--update-config|--azure-create|--azure-delete|--monitor|--check|--prepare|--load|--cleanup)
+        --setup-control-machine|--setup|--update-hammerdb|--update-config|--azure-create|--azure-delete|--monitor|--check|--prepare|--load|--verify|--cleanup)
             [[ "$action_set" == false ]] || usage_error "Choose only one action"
             RUN_ACTION="${1#--}"
             action_set=true
@@ -267,6 +273,11 @@ then
 fi
 
 [[ -z "$setup_host" ]] || usage_error "--host is only valid with --setup, --update-hammerdb or --update-config"
+if [[ "$RUN_ACTION" == verify && -z "$BENCHMARK_TYPE" ]]
+then
+    BENCHMARK_TYPE=hammerdb
+fi
+
 [[ -n "$BENCHMARK_TYPE" ]] ||
 {
     printf "ERROR: BENCHMARK is required. Supported benchmarks: hammerdb\n" >&2
