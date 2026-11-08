@@ -1,12 +1,13 @@
 AZURE VM BATCH SCRIPTS
 =====================
 
-Package v9
+Package v10
 
-Files (keep all eight together)
+Files (keep all nine together)
   create-azure-vms.sh       Create individually named Linux VMs.
   delete-azure-vms.sh       Delete selected VMs and their dedicated resources.
   azure-vm-common.sh        Required data-file loader and path helpers.
+  azure_vm_network.py       Required controller NIC/subnet discovery helper.
   azure-vm-ssh-config.py    Required helper when local SSH updates are enabled.
   azure-vm-delete-attached.py  Required helper for --include-unmanaged deletion.
   azure-vm-hosts.py         Required helper when --hosts-file is supplied.
@@ -127,30 +128,54 @@ Environment-to-flag mapping:
   AZVM_SECURITY_TYPE           --security-type
   AZVM_ACCELERATED_NETWORKING   --accelerated-networking
   AZVM_SUBNET_ID                --subnet-id
+  AZVM_CONTROL_VM               --control-vm (both scripts)
+  AZVM_CONTROL_RESOURCE_GROUP   --control-resource-group (both scripts)
   AZVM_VNET_CIDR                --vnet-cidr
   AZVM_SUBNET_CIDR              --subnet-cidr
   AZVM_UPDATE_SSH_CONFIG        --update-ssh-config true|false (both scripts)
   AZVM_SSH_CONFIG_FILE          --ssh-config-file (both scripts)
+  AZVM_SSH_CONFIG_MODE          --ssh-config-mode split|single (both scripts)
+  AZVM_SSH_PUBLIC_CONFIG_FILE   --ssh-public-config-file (both scripts)
+  AZVM_SSH_PRIVATE_CONFIG_FILE  --ssh-private-config-file (both scripts)
   AZVM_SSH_PRIVATE_KEY          --ssh-private-key (creation)
   AZVM_SSH_PORT                 --ssh-port (creation)
   AZVM_SSH_ADDRESS              --ssh-address auto|public|private (creation)
 
 Deletion uses subscription, resource group, name prefix, count, start, digits,
-subnet ID and local SSH update/config settings. It does not require a private
-key or SSH port to remove entries. A nonempty subnet ID preserves the external
-network. A blank subscription stops before Azure requests. An empty subnet ID
-means use the managed VNet. Numeric suffixes stay at two digits, 01 through 20.
+subnet ID, controller selector and local SSH update/config settings. It does not
+require a private key, SSH port or a live controller lookup to remove entries.
+A nonempty subnet ID or controller name preserves the external network.
+A blank subscription stops before Azure requests. Without a controller or
+subnet ID, creation uses the managed VNet. Numeric suffixes stay at two digits,
+01 through 20.
 
-0A. LOCAL SSH CONFIG ENTRIES
+0A. SPLIT LOCAL SSH CONFIG ENTRIES
 
 To enable this feature in an existing configured env file, add these settings
 once, using your actual local private key path:
 
   export AZVM_UPDATE_SSH_CONFIG="true"
+  export AZVM_SSH_CONFIG_MODE="split"
   export AZVM_SSH_CONFIG_FILE="$HOME/.ssh/config"
   export AZVM_SSH_PRIVATE_KEY="$HOME/.ssh/id_rsa"
   export AZVM_SSH_PORT="22"
   export AZVM_SSH_ADDRESS="auto"
+
+Split is the default mode. It creates sshconfig-pg-benchmark-public.conf and
+sshconfig-pg-benchmark-private.conf directly in the command's current working
+directory, not the repository/env-file directory and not a subfolder. The wrapper
+preserves the caller's directory. Default files and their locks are Git-ignored
+when created within this checkout; do not commit outputs placed elsewhere.
+
+It requires public IP creation and writes both addresses, so AZVM_SSH_ADDRESS
+must remain auto. The output paths and main Include destination are configurable
+through their AZVM_* settings or CLI flags. Explicit relative overrides still
+use the env file directory; omit output-path settings to use working-dir defaults.
+All three config paths must be distinct and must not overwrite the private key.
+Hard links to another selected config or to the private key are also refused.
+Run deletion from the creation directory or supply the same explicit output
+paths. Previously generated files are not automatically moved; use their original
+paths when cleaning up VMs created with the previous defaults.
 
 AZVM_SSH_KEY remains the PUBLIC key installed on Azure. AZVM_SSH_PRIVATE_KEY
 is the local IdentityFile used by your SSH client; it must be a readable regular
@@ -158,14 +183,16 @@ file at creation time. Its contents are never read or uploaded by this feature.
 The scripts do not verify the public/private key pair; supply a matching pair.
 A passphrase-protected key works normally when SSH later prompts or uses an agent.
 
-The bundled template enables SSH updates and uses id_ed25519/id_ed25519.pub;
-existing files that omit AZVM_UPDATE_SSH_CONFIG default to false. Set it to
-false (or use --update-ssh-config false) to leave SSH configuration untouched.
-Keep it true, with the same config path, for deletion to remove managed entries.
+The bundled template enables SSH updates. Without a controller, files that omit
+AZVM_UPDATE_SSH_CONFIG default to false; set it false to leave SSH untouched.
+With a controller, the omitted setting defaults to true, and creation rejects
+false, single mode or private-only VMs because this workflow requires dual access.
+Keep the same controller, mode and config paths for deletion.
 
 After each successfully created and tagged VM, the script reads its assigned IP
-and adds/updates a Host block such as:
+addresses and adds/updates separate Host blocks:
 
+  # sshconfig-pg-benchmark-public.conf
   Host hamid-vm-r06
       HostName 203.0.113.10
       Port 22
@@ -173,40 +200,76 @@ and adds/updates a Host block such as:
       IdentityFile "/home/you/.ssh/id_rsa"
       IdentitiesOnly yes
 
-The IP above is illustrative. HostName uses the actual assigned address; User
-uses the effective admin user, including any --admin-user override. You can
-then run ssh hamid-vm-r06. auto selects the public IP when public IPs are enabled,
-otherwise the private IP. private always uses the private address, which needs
-an existing network route. public requires public IP creation to be enabled.
+  # sshconfig-pg-benchmark-private.conf
+  Host hamid-vm-r06-private
+      HostName 10.40.0.5
+      Port 22
+      User azuresu
+      IdentityFile "/home/you/.ssh/id_rsa"
+      IdentitiesOnly yes
+
+Addresses above are illustrative; both HostNames use the actual assigned IPs.
+User uses the effective admin user, including any --admin-user override.
+The original VM alias uses its public IP; the -private alias uses its private IP.
+Only the original VM name is added to the runner inventory, not both aliases.
+
+The main SSH config is changed only to prepend missing global Include directives,
+using absolute quoted paths such as these when run from /path/to/pg_benchmark:
+
+  Include "/path/to/pg_benchmark/sshconfig-pg-benchmark-public.conf"
+  Include "/path/to/pg_benchmark/sshconfig-pg-benchmark-private.conf"
+
+All existing main-config content is preserved byte-for-byte. Existing global
+Includes covering the output files are reused; conditional Includes alone do
+not replace global ones. Includes are never duplicated on repeated runs.
+Existing explicit Host aliases in the main config or other Include files cause
+preflight refusal, not automatic migration or replacement of existing entries.
+
+Connect with either alias, or specify a file directly:
+
+  ssh hamid-vm-r06
+  ssh hamid-vm-r06-private
+  ssh -F ./sshconfig-pg-benchmark-public.conf hamid-vm-r06
+  ssh -F ./sshconfig-pg-benchmark-private.conf hamid-vm-r06-private
+
+The files are written on the machine running creation. Private IPs require an
+existing route: use the controller, a VPN or another configured access path.
+The controller's subnet NSG, routing and guest firewalls still apply.
 AZVM_SSH_PORT sets the CLIENT entry only. The supplied VM SSH service and added
 NSG rule use port 22; a different client port requires separately configured
 server/network forwarding. The feature does not configure a jump host or sshd.
 
-Entries are stored in a marked managed section at the start of the selected
-config, before general defaults. Metadata binds each alias to its subscription,
-resource group and VM name. Unmanaged content is preserved byte-for-byte; a
-Host * reset preserves its original leading global settings. Creation refuses
-an explicit manual alias collision in the file or supported Include files.
-It reads Includes but never executes Match exec directives. Host-dependent
-Include tokens that cannot be inspected safely produce a preflight error.
+Entries are stored in marked managed sections in the two output files, not in
+the main config. Metadata binds both aliases to the original VM name,
+subscription and resource group, so deletion handles the private suffix safely.
+Unmanaged output-file content is preserved. A Host * reset in each output file
+restores matching for subsequent Include files and the original main config.
+The helper reads Includes but never executes Match exec directives.
+Host-dependent Include tokens that cannot be inspected safely produce an error.
 
 Do not hand-edit the managed section or its metadata. The helper detects edited,
 malformed or duplicate markers and stops for inspection. Mutation uses a lock
 and an atomic replacement, with mode 0600 for the config and 0700 for newly
 created directories. A harmless config.azvm.lock file remains for locking.
-Symlink config/lock files are refused. Helpers run locally in Linux/WSL/macOS;
+Symlink config/lock files are refused. Symlinked directories are supported;
+locks use a consistent physical-path order
+and existing Includes are reused even when the directory is reached by an alias.
+Helpers run locally in Linux/WSL/macOS;
 the default HOME/.ssh/config is the config for that environment's SSH client.
 
-Before any Azure writes, creation validates the entire set of requested aliases
-and the key/config paths. It adds each entry after that VM succeeds, so a later
-failure retains entries for already completed VMs. A failed local write leaves
-the created VM in place and reports the failure. Dry runs do not edit the SSH
-config or create its directory, replacement files or locks. Public-key validation
-uses a temporary public-key file that is removed on exit.
+Before any Azure writes, creation validates both sets of aliases and all
+key/config paths. Updates occur after each successful VM. Replacements are
+atomic per file, not transactional across the three files: a local write failure
+stops creation, reports the error and leaves the VM and any completed local
+updates for inspection/cleanup. Includes are added only after both output files
+are ready. Dry runs do not edit configs or create their directories/files/locks.
+Public-key validation uses a temporary file that is removed on exit.
 
 Deletion includes matching managed entries in the plan. Declining a VM or a
 failed VM deletion preserves its entry. Once VM absence is confirmed, the entry
-is removed even if a later dependent-resource cleanup fails. Stale owned entries
+is removed from both output files even if later resource cleanup fails.
+The main config and its Includes are never changed by split-mode deletion.
+Empty output files are retained. Stale owned entries
 can also be removed when the VM or its resource group is already absent, using
 the same --dry-run/--interactive/--yes behavior. Entries from another scope and
 unmanaged entries are preserved. Known-hosts files are not changed.
@@ -214,6 +277,14 @@ unmanaged entries are preserved. Known-hosts files are not changed.
 This integrates entries for VMs created with the new option enabled; creation
 still rejects already occupied VM names. It does not adopt manually created VMs
 or automatically populate entries for VMs made by earlier package versions.
+
+Legacy one-file output remains available explicitly with
+AZVM_SSH_CONFIG_MODE="single" or --ssh-config-mode single, without a controller.
+AZVM_SSH_CONFIG_FILE is then the managed output file, and AZVM_SSH_ADDRESS selects
+auto/public/private as before. auto chooses public when public IPs are enabled,
+otherwise private. This mode supports private-only VMs and intentionally retains
+the previous ability to manage Host entries directly in the selected file.
+Existing marked sections remain readable after split-mode Include insertion.
 
 0B. CLEAR VARIABLES EXPORTED BY AN EARLIER SOURCE COMMAND
 
@@ -272,6 +343,8 @@ your organization's policies. Creating a resource group also needs permission
 at subscription scope. An existing subnet in another resource group requires
 the appropriate read/join permissions there. Resource locks or Azure Policy
 can still prevent an operation even when RBAC grants the resource permission.
+Controller selection also requires read access to its VM and primary NIC,
+including when those resources are in a different resource group.
 Creation preflight also needs subscription-level read access to regional VM
 SKU metadata and VM usage/quotas. A failed quota read stops creation.
 
@@ -404,7 +477,26 @@ Azure mutation, including PIP names when --no-public-ip is used.
 
 4. NETWORKING
 
-By default the script creates or reuses an owned shared VNet named
+To place every new runner in the existing controller VNet:
+
+  ./create-azure-vms.sh --env-file ./azure-vms.env \
+    --control-vm controller-vm --control-resource-group controller-rg --dry-run
+
+Or set AZVM_CONTROL_VM and optional AZVM_CONTROL_RESOURCE_GROUP in the file.
+The controller's group defaults to the runner resource group. Discovery follows
+the primary NIC and its primary IP configuration to the existing subnet, once
+for the batch. Ambiguous or invalid network metadata causes refusal before any
+Azure writes; there is no fallback to creating another VNet.
+
+Every new runner NIC joins that subnet. A supplied --subnet-id may select another
+subnet only within the controller's VNet. The selected network must be in the
+chosen subscription and VM region; cross-resource-group placement is supported.
+Controller mode requires public IPs and enabled split SSH configuration.
+The controller, subnet, VNet, NSGs and routes are not edited or retagged, and no
+peering is created. Deletion always preserves the controller network, without
+requiring the controller to still exist.
+
+Without a controller or explicit subnet, the script creates or reuses an owned shared VNet named
 PREFIX-vnet, with a subnet named default. A pre-existing VNet with that name
 must have the script's ownership tags, requested region and matching address
 ranges; otherwise creation stops. Choose address ranges that fit your planned
@@ -424,7 +516,8 @@ The subnet must already exist in the same subscription and region. Its VNet
 can be in another resource group. The script does not edit or retag it. With
 --subnet-id, the managed --vnet-cidr and --subnet-cidr options are unused.
 
-For private-only VMs add --no-public-ip and optionally omit --ssh-source.
+For private-only VMs without a controller, add --no-public-ip and optionally
+omit --ssh-source. Use --ssh-config-mode single or --update-ssh-config false.
 Provide VPN, Bastion, a jump host or another existing private access path.
 The script does not create any of those services.
 
@@ -439,7 +532,9 @@ attached to the NIC is an explicit outbound method for the default public mode.
 Use the same subscription, resource group, prefix and starting index that
 identify the VMs you want to remove. Suffix width is always two digits and the
 selected range must stay within 01..20. Region/key/admin are not needed.
-Preserve the original AZVM_SUBNET_ID setting if an existing subnet was used.
+Preserve the original AZVM_SUBNET_ID setting if an existing subnet was used,
+or AZVM_CONTROL_VM if controller-based placement was used. Keep split output
+paths unchanged so both sets of aliases can be removed.
 
 Preview without changing anything:
 
@@ -500,8 +595,9 @@ prints the reason. It does not remove unrelated services to unblock deletion.
 
 The script can also remove an eligible empty owned network when the VMs have
 already been deleted, such as after a partial deployment or cleanup failure.
-Keep --subnet-id / AZVM_SUBNET_ID nonempty for an externally supplied subnet;
-this disables automatic network cleanup. Deletion of the owned VNet removes
+Keep --subnet-id / AZVM_SUBNET_ID nonempty for an externally supplied subnet,
+or retain --control-vm / AZVM_CONTROL_VM for controller placement; either
+disables automatic network cleanup. Deletion of the owned VNet removes
 its default subnet as part of the same Azure operation.
 
 OS disk deletion is permanent. There is no keep-disk option in this package.

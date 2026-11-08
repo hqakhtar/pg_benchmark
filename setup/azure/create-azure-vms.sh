@@ -37,10 +37,17 @@ ACCELERATED_NETWORKING=${AZVM_ACCELERATED_NETWORKING-true}
 SSH_SOURCE=${AZVM_SSH_SOURCE-}
 PUBLIC_IP=${AZVM_PUBLIC_IP-true}
 SUBNET_ID=${AZVM_SUBNET_ID-}
+CONTROL_VM=${AZVM_CONTROL_VM-}
+CONTROL_RESOURCE_GROUP=${AZVM_CONTROL_RESOURCE_GROUP-}
 VNET_CIDR=${AZVM_VNET_CIDR-10.50.0.0/16}
 SUBNET_CIDR=${AZVM_SUBNET_CIDR-10.50.0.0/24}
 UPDATE_SSH_CONFIG=${AZVM_UPDATE_SSH_CONFIG-false}
+UPDATE_SSH_CONFIG_SET=${AZVM_UPDATE_SSH_CONFIG+set}
 SSH_CONFIG_FILE=${AZVM_SSH_CONFIG_FILE-$HOME/.ssh/config}
+SSH_CONFIG_MODE=${AZVM_SSH_CONFIG_MODE-split}
+WORKING_DIRECTORY=${AZVM_WORK_DIR-$PWD}
+SSH_PUBLIC_CONFIG_FILE=${AZVM_SSH_PUBLIC_CONFIG_FILE-$WORKING_DIRECTORY/sshconfig-pg-benchmark-public.conf}
+SSH_PRIVATE_CONFIG_FILE=${AZVM_SSH_PRIVATE_CONFIG_FILE-$WORKING_DIRECTORY/sshconfig-pg-benchmark-private.conf}
 SSH_PRIVATE_KEY=${AZVM_SSH_PRIVATE_KEY-}
 SSH_PORT=${AZVM_SSH_PORT-22}
 SSH_ADDRESS=${AZVM_SSH_ADDRESS-auto}
@@ -86,14 +93,27 @@ Optional:
                              firewall or another configured outbound method.
   --subnet-id RESOURCE_ID     Use an existing subnet in this subscription/region.
                              Its VNet is preserved and is never retagged.
+  --control-vm NAME          Reuse this controller's primary NIC subnet.
+                             Requires public IPs and split SSH configuration.
+  --control-resource-group NAME
+                             Controller's group; default: runner resource group.
   --vnet-cidr IPV4_CIDR       Managed VNet range (default: 10.50.0.0/16).
   --subnet-cidr IPV4_CIDR     Managed subnet range (default: 10.50.0.0/24).
-  --update-ssh-config BOOL   Add local managed Host entries (default: false).
-  --ssh-config-file PATH     Default: $HOME/.ssh/config.
+  --update-ssh-config BOOL   Add local SSH entries (default: true with a controller,
+                             otherwise false). Controller mode requires true.
+  --ssh-config-mode MODE     split (default) or single (legacy output).
+  --ssh-config-file PATH     Main Include destination in split mode; legacy
+                             output in single mode. Default: $HOME/.ssh/config.
+  --ssh-public-config-file PATH
+                             Default: sshconfig-pg-benchmark-public.conf in the
+                             command's current working directory.
+  --ssh-private-config-file PATH
+                             Default: sshconfig-pg-benchmark-private.conf in the
+                             command's current working directory.
   --ssh-private-key PATH     Local IdentityFile; required when SSH updates are on.
   --ssh-port PORT            SSH client port (default: 22); does not alter sshd/NSG.
-  --ssh-address MODE         auto (default), public or private; auto uses public
-                             IPs when enabled, otherwise private IPs.
+  --ssh-address MODE         Single mode: auto (default), public or private.
+                             Split mode requires auto and writes both addresses.
   --hosts-file PATH          Add each created VM alias to this plain hosts file.
                              Preserve existing hosts; relative to current directory.
   --dry-run                  Validate/preview, including batch vCPU quota;
@@ -106,7 +126,10 @@ Environment-file example (edit the file first):
 
 CLI arguments override file settings; inherited AZVM_* variables are ignored.
 The file supports assignments, optional export, quotes, comments and $HOME;
-shell commands are rejected. Relative file paths use the env file's directory.
+shell commands are rejected. Explicit relative file paths use the env file's
+directory. Default split SSH files use the command's working directory instead.
+No SSH output subdirectory is created. Run deletion from the same directory
+or supply the same explicit public/private config paths.
 For all IPv4 SSH sources use
 AZVM_SSH_SOURCE="0.0.0.0/0" with AZVM_PUBLIC_IP=true.
 
@@ -122,9 +145,13 @@ hamid-vm-r01, hamid-vm-r02, ..., hamid-vm-r20. The requested range must end at
 To add VMs later, use --start with the first unused number within that range.
 
 Each VM has its own -nic, -nsg, -osdisk and (unless private-only) -pip resources.
-The default shared VNet is PREFIX-vnet, subnet default. Reuse requires matching
+Without a controller or subnet ID, the shared VNet is PREFIX-vnet, subnet default. Reuse requires matching
 ownership tags, region and address ranges. --vnet-cidr/--subnet-cidr only apply
-when --subnet-id is absent. NSGs retain Azure's default VNet rules; the SSH
+when neither --control-vm nor --subnet-id is supplied. A supplied subnet must
+belong to the controller's VNet when both selectors are used.
+Split SSH mode writes VM_NAME (public) and VM_NAME-private (private) in separate
+files; the main config receives only Include directives. It requires public IPs.
+NSGs retain Azure's default VNet rules; the SSH
 source restriction controls the additional public inbound SSH rule.
 
 The matching deletion script can find resources by these tags:
@@ -274,7 +301,8 @@ while (( $# )); do
         --subscription|--resource-group|--location|--count|--name-prefix|--ssh-key|\
         --admin-user|--start|--digits|--image|--size|--os-disk-size|--storage-sku|\
         --security-type|--accelerated-networking|--public-ip|--ssh-source|--subnet-id|--vnet-cidr|--subnet-cidr|\
-        --update-ssh-config|--ssh-config-file|--ssh-private-key|--ssh-port|--ssh-address|--hosts-file)
+        --control-vm|--control-resource-group|--update-ssh-config|--ssh-config-file|--ssh-config-mode|\
+        --ssh-public-config-file|--ssh-private-config-file|--ssh-private-key|--ssh-port|--ssh-address|--hosts-file)
             need_value "$@"
             case $1 in
                 --subscription) SUBSCRIPTION=$2 ;;
@@ -295,10 +323,15 @@ while (( $# )); do
                 --public-ip) PUBLIC_IP=$2 ;;
                 --ssh-source) SSH_SOURCE=$2 ;;
                 --subnet-id) SUBNET_ID=$2 ;;
+                --control-vm) CONTROL_VM=$2 ;;
+                --control-resource-group) CONTROL_RESOURCE_GROUP=$2 ;;
                 --vnet-cidr) VNET_CIDR=$2 ;;
                 --subnet-cidr) SUBNET_CIDR=$2 ;;
-                --update-ssh-config) UPDATE_SSH_CONFIG=$2 ;;
+                --update-ssh-config) UPDATE_SSH_CONFIG=$2; UPDATE_SSH_CONFIG_SET=set ;;
                 --ssh-config-file) SSH_CONFIG_FILE=$2 ;;
+                --ssh-config-mode) SSH_CONFIG_MODE=$2 ;;
+                --ssh-public-config-file) SSH_PUBLIC_CONFIG_FILE=$2 ;;
+                --ssh-private-config-file) SSH_PRIVATE_CONFIG_FILE=$2 ;;
                 --ssh-private-key) SSH_PRIVATE_KEY=$2 ;;
                 --ssh-port) SSH_PORT=$2 ;;
                 --ssh-address) SSH_ADDRESS=$2 ;;
@@ -329,7 +362,18 @@ done
 case $SECURITY_TYPE in TrustedLaunch|Standard) ;; *) die '--security-type must be TrustedLaunch or Standard.' ;; esac
 case $ACCELERATED_NETWORKING in true|false) ;; *) die '--accelerated-networking must be true or false.' ;; esac
 case $PUBLIC_IP in true|false) ;; *) die '--public-ip / AZVM_PUBLIC_IP must be true or false.' ;; esac
-case $UPDATE_SSH_CONFIG in true|false) ;; *) die '--update-ssh-config / AZVM_UPDATE_SSH_CONFIG must be true or false.' ;; esac
+azvm_ssh_config_settings || die 'Invalid local SSH configuration settings.'
+if [[ -n $CONTROL_VM ]]; then
+    [[ $CONTROL_VM =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$ ]] || die 'Invalid --control-vm name.'
+    CONTROL_RESOURCE_GROUP=${CONTROL_RESOURCE_GROUP:-$RESOURCE_GROUP}
+    [[ $CONTROL_RESOURCE_GROUP =~ ^[a-zA-Z0-9._\(\)-]+$ && ${#CONTROL_RESOURCE_GROUP} -le 90 && $CONTROL_RESOURCE_GROUP != *. ]] ||
+        die 'Invalid --control-resource-group name.'
+    [[ $PUBLIC_IP == true && $UPDATE_SSH_CONFIG == true && $SSH_CONFIG_MODE == split ]] ||
+        die 'Controller runners require public IPs and enabled split SSH configuration.'
+    [[ -r $SCRIPT_DIR/azure_vm_network.py ]] || die 'Missing azure_vm_network.py; keep all package files together.'
+elif [[ -n $CONTROL_RESOURCE_GROUP ]]; then
+    die '--control-resource-group requires --control-vm.'
+fi
 [[ -n $IMAGE ]] || die '--image / AZVM_IMAGE must not be empty.'
 case $STORAGE_SKU in
     Standard_LRS|StandardSSD_LRS|Premium_LRS|StandardSSD_ZRS|Premium_ZRS) ;;
@@ -350,19 +394,24 @@ fi
 if [[ $UPDATE_SSH_CONFIG == true ]]; then
     [[ -r $SCRIPT_DIR/azure-vm-ssh-config.py ]] || die 'Missing azure-vm-ssh-config.py; keep all package files together.'
     [[ -n $SSH_CONFIG_FILE && -n $SSH_PRIVATE_KEY ]] || die 'SSH updates require AZVM_SSH_CONFIG_FILE and AZVM_SSH_PRIVATE_KEY (or their flags).'
-    SSH_CONFIG_FILE=$(azvm_resolve_path "$SSH_CONFIG_FILE") || die 'Cannot resolve the SSH config path.'
     SSH_PRIVATE_KEY=$(azvm_resolve_path "$SSH_PRIVATE_KEY") || die 'Cannot resolve the SSH private-key path.'
     uint_option SSH_PORT "$SSH_PORT" 1 65535
-    case $SSH_ADDRESS in
-        auto) if [[ $PUBLIC_IP == true ]]; then SSH_ADDRESS_MODE=public; else SSH_ADDRESS_MODE=private; fi ;;
-        public) [[ $PUBLIC_IP == true ]] || die '--ssh-address public requires public IP creation.'; SSH_ADDRESS_MODE=public ;;
-        private) SSH_ADDRESS_MODE=private ;;
-        *) die '--ssh-address / AZVM_SSH_ADDRESS must be auto, public or private.' ;;
-    esac
+    if [[ $SSH_CONFIG_MODE == split ]]; then
+        [[ $PUBLIC_IP == true ]] || die 'Split SSH configuration requires public IPs; use single mode for private-only VMs.'
+        [[ $SSH_ADDRESS == auto ]] || die '--ssh-address must be auto in split mode; use single mode to select one address.'
+        SSH_ADDRESS_MODE=split
+    else
+        case $SSH_ADDRESS in
+            auto) if [[ $PUBLIC_IP == true ]]; then SSH_ADDRESS_MODE=public; else SSH_ADDRESS_MODE=private; fi ;;
+            public) [[ $PUBLIC_IP == true ]] || die '--ssh-address public requires public IP creation.'; SSH_ADDRESS_MODE=public ;;
+            private) SSH_ADDRESS_MODE=private ;;
+            *) die '--ssh-address / AZVM_SSH_ADDRESS must be auto, public or private.' ;;
+        esac
+    fi
 fi
 
 VNET_NAME=${PREFIX}-vnet
-if [[ -z $SUBNET_ID ]]; then
+if [[ -z $SUBNET_ID && -z $CONTROL_VM ]]; then
     check_cidr "$VNET_CIDR" '--vnet-cidr'
     VNET_FIRST=$CIDR_NETWORK; VNET_LAST=$CIDR_LAST
     check_cidr "$SUBNET_CIDR" '--subnet-cidr'
@@ -378,7 +427,7 @@ done
 
 # Show resolved settings before Azure reads or resource-collision checks.
 # %q preserves otherwise invisible characters in the diagnostic output.
-printf 'Effective config (v9): script=%q subscription-selector=%q resource-group=%q size=%q location=%q start=%s count=%s\n' \
+printf 'Effective config (v10): script=%q subscription-selector=%q resource-group=%q size=%q location=%q start=%s count=%s\n' \
     "${BASH_SOURCE[0]}" "$SUBSCRIPTION" "$RESOURCE_GROUP" "$SIZE" "$LOCATION" "$START" "$COUNT" >&2
 printf 'Settings file: %s\n' "$AZVM_ENV_FILE" >&2
 
@@ -406,10 +455,10 @@ ACCOUNT=$(az account show --subscription "$SUBSCRIPTION" --only-show-errors --ou
 SUBSCRIPTION_ID=$(jq -erj '.id | select(type == "string" and length > 0)' <<< "$ACCOUNT") || die 'Subscription response has no ID.'
 SUBSCRIPTION_NAME=$(jq -rj '.name // .id' <<< "$ACCOUNT") || die 'Invalid subscription response.'
 if [[ $UPDATE_SSH_CONFIG == true ]]; then
-    SSH_SCOPE_ARGS=(--config "$SSH_CONFIG_FILE" --subscription "$SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP")
+    azvm_ssh_scope_args
     SSH_CHECK_ARGS=("${SSH_SCOPE_ARGS[@]}" --user "$ADMIN_USER" --port "$SSH_PORT" --identity-file "$SSH_PRIVATE_KEY")
     for vm_name in "${VM_NAMES[@]}"; do SSH_CHECK_ARGS+=(--vm-name "$vm_name"); done
-    python3 "$SCRIPT_DIR/azure-vm-ssh-config.py" check-add "${SSH_CHECK_ARGS[@]}" >/dev/null ||
+    python3 "$SCRIPT_DIR/azure-vm-ssh-config.py" "$SSH_CHECK_ADD_ACTION" "${SSH_CHECK_ARGS[@]}" >/dev/null ||
         die 'Local SSH config preflight failed; no Azure resources were changed.'
 fi
 # account list-locations does not accept --subscription. Use the ARM endpoint
@@ -470,16 +519,38 @@ COLLISIONS=$(jq -r --argjson planned "$PLANNED_RESOURCES" '
 $COLLISIONS"
 
 NEW_VNET=false
+NETWORK_SOURCE=managed
+CONTROL_VNET_ID=''
+if [[ -n $CONTROL_VM ]]; then
+    CONTROL_NETWORK=$(python3 "$SCRIPT_DIR/azure_vm_network.py" --subscription "$SUBSCRIPTION_ID" \
+        --resource-group "$CONTROL_RESOURCE_GROUP" --vm-name "$CONTROL_VM") ||
+        die 'Cannot resolve the controller network; no Azure resources were changed.'
+    CONTROL_VNET_ID=$(jq -erj '.vnet_id | select(type == "string" and length > 0)' <<< "$CONTROL_NETWORK") ||
+        die 'Controller network response has no VNet ID.'
+    if [[ -z $SUBNET_ID ]]; then
+        SUBNET_ID=$(jq -erj '.subnet_id | select(type == "string" and length > 0)' <<< "$CONTROL_NETWORK") ||
+            die 'Controller network response has no subnet ID.'
+        NETWORK_SOURCE=controller
+    fi
+fi
 if [[ -n $SUBNET_ID ]]; then
+    if [[ $NETWORK_SOURCE != controller ]]; then NETWORK_SOURCE=explicit-subnet; fi
     [[ ${SUBNET_ID,,} =~ ^/subscriptions/([^/]+)/resourcegroups/[^/]+/providers/microsoft\.network/virtualnetworks/[^/]+/subnets/[^/]+$ ]] || \
         die '--subnet-id must be a full Azure subnet resource ID.'
     [[ ${BASH_REMATCH[1]} == "${SUBSCRIPTION_ID,,}" ]] || die 'The existing subnet must be in the selected subscription.'
     EXISTING_VNET_ID=${SUBNET_ID%/*}; EXISTING_VNET_ID=${EXISTING_VNET_ID%/*}
+    [[ -z $CONTROL_VNET_ID || ${EXISTING_VNET_ID,,} == "${CONTROL_VNET_ID,,}" ]] ||
+        die 'The supplied subnet is outside the controller VNet; no Azure resources were changed.'
     VNET_JSON=$(az_cli network vnet show --ids "$EXISTING_VNET_ID" --output json) || die 'Cannot read the existing VNet.'
+    jq -e --arg id "$EXISTING_VNET_ID" '
+        (.id | type == "string") and (.id | ascii_downcase) == ($id | ascii_downcase)
+    ' <<< "$VNET_JSON" >/dev/null || die 'The existing VNet response has an unexpected resource ID.'
     jq -e --arg location "$LOCATION" '.location == $location' <<< "$VNET_JSON" >/dev/null || \
         die 'The existing VNet is not in the requested VM region.'
     SUBNET_JSON=$(az_cli network vnet subnet show --ids "$SUBNET_ID" --output json) || die 'Cannot read the existing subnet.'
+    REQUESTED_SUBNET_ID=$SUBNET_ID
     SUBNET_ID=$(jq -erj '.id | select(type == "string" and length > 0)' <<< "$SUBNET_JSON") || die 'The subnet response has no ID.'
+    [[ ${SUBNET_ID,,} == "${REQUESTED_SUBNET_ID,,}" ]] || die 'The existing subnet response has an unexpected resource ID.'
 else
     EXISTING_VNET_COUNT=$(jq -rj --arg name "$VNET_NAME" '
         [.[] | select((.type | ascii_downcase) == "microsoft.network/virtualnetworks"
@@ -513,10 +584,19 @@ printf 'OS disk: %s GiB, %s; security: %s\n' "$OS_DISK_SIZE" "$STORAGE_SKU" "$SE
 printf 'Accelerated networking: %s\n' "$ACCELERATED_NETWORKING"
 printf 'SSH key: %s\n' "$KEY_SUMMARY"
 if [[ $UPDATE_SSH_CONFIG == true ]]; then
-    printf 'SSH config: %s; address=%s; client port=%s; IdentityFile=%s\n' "$SSH_CONFIG_FILE" "$SSH_ADDRESS_MODE" "$SSH_PORT" "$SSH_PRIVATE_KEY"
+    if [[ $SSH_CONFIG_MODE == split ]]; then
+        printf 'SSH configs: public=%s; private=%s; Include destination=%s\n' "$SSH_PUBLIC_CONFIG_FILE" "$SSH_PRIVATE_CONFIG_FILE" "$SSH_CONFIG_FILE"
+    else
+        printf 'SSH config: %s; address=%s\n' "$SSH_CONFIG_FILE" "$SSH_ADDRESS_MODE"
+    fi
+    printf 'SSH client port=%s; IdentityFile=%s\n' "$SSH_PORT" "$SSH_PRIVATE_KEY"
     printf 'Host aliases will be the VM names; entries are added after each successful creation.\n'
 fi
 printf 'Subnet: %s\n' "$SUBNET_ID"
+printf 'Network source: %s\n' "$NETWORK_SOURCE"
+if [[ -n $CONTROL_VM ]]; then
+    printf 'Controller: %s (%s); VNet: %s (preserved)\n' "$CONTROL_VM" "$CONTROL_RESOURCE_GROUP" "$CONTROL_VNET_ID"
+fi
 if [[ $NEW_VNET == true ]]; then printf 'Create shared VNet: %s (%s), subnet default (%s)\n' "$VNET_NAME" "$VNET_CIDR" "$SUBNET_CIDR"; fi
 printf 'Public IPs: %s; added SSH allow rule: %s\n' "$PUBLIC_IP" "${SSH_SOURCE:-none (default VNet rules still apply)}"
 printf 'Ownership: managedBy=%s vmBatch=%s; per-VM resources also have vmName\n' "$MANAGER" "$PREFIX"
@@ -633,12 +713,18 @@ for vm_name in "${VM_NAMES[@]}"; do
         die "VM $vm_name was created, but its runner hosts entry could not be written."
     read_vm_addresses "$vm_name"
     if [[ $UPDATE_SSH_CONFIG == true ]]; then
-        if [[ $SSH_ADDRESS_MODE == public ]]; then SSH_HOSTNAME=$PUBLIC_ADDRESS; else SSH_HOSTNAME=$PRIVATE_ADDRESS; fi
-        python3 "$SCRIPT_DIR/azure-vm-ssh-config.py" add "${SSH_SCOPE_ARGS[@]}" \
-            --vm-name "$vm_name" --hostname "$SSH_HOSTNAME" --user "$ADMIN_USER" \
-            --port "$SSH_PORT" --identity-file "$SSH_PRIVATE_KEY" >/dev/null ||
+        SSH_ADD_ARGS=("${SSH_SCOPE_ARGS[@]}" --vm-name "$vm_name" --user "$ADMIN_USER"
+            --port "$SSH_PORT" --identity-file "$SSH_PRIVATE_KEY")
+        if [[ $SSH_CONFIG_MODE == split ]]; then
+            SSH_ADD_ARGS+=(--hostname "$PUBLIC_ADDRESS" --private-hostname "$PRIVATE_ADDRESS")
+        else
+            if [[ $SSH_ADDRESS_MODE == public ]]; then SSH_HOSTNAME=$PUBLIC_ADDRESS; else SSH_HOSTNAME=$PRIVATE_ADDRESS; fi
+            SSH_ADD_ARGS+=(--hostname "$SSH_HOSTNAME")
+        fi
+        python3 "$SCRIPT_DIR/azure-vm-ssh-config.py" "$SSH_ADD_ACTION" "${SSH_ADD_ARGS[@]}" >/dev/null ||
             die "VM $vm_name was created, but its local SSH config entry could not be written."
         note "SSH entry ready: ssh $vm_name"
+        if [[ $SSH_CONFIG_MODE == split ]]; then note "Private SSH entry ready: ssh $vm_name-private"; fi
     fi
 done
 
@@ -649,6 +735,11 @@ for vm_name in "${VM_NAMES[@]}"; do
 done
 if [[ $UPDATE_SSH_CONFIG == true ]]; then
     printf '\nSSH: ssh %s (or another VM name shown above)\n' "${VM_NAMES[0]}"
+    if [[ $SSH_CONFIG_MODE == split ]]; then
+        printf 'Private SSH: ssh %s-private\n' "${VM_NAMES[0]}"
+        printf 'Direct configs: ssh -F %q %s; ssh -F %q %s-private\n' \
+            "$SSH_PUBLIC_CONFIG_FILE" "${VM_NAMES[0]}" "$SSH_PRIVATE_CONFIG_FILE" "${VM_NAMES[0]}"
+    fi
 else
     printf '\nSSH: ssh -i <your-private-key-file> %s@<reachable-IP>\n' "$ADMIN_USER"
 fi

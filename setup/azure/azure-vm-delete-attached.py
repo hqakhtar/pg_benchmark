@@ -554,6 +554,8 @@ class Journals:
 def ssh_action(config, azure, names, action):
     if config is None:
         return []
+    if isinstance(config, list):
+        return sorted({name for path in config for name in ssh_action(path, azure, names, action)})
     helper = Path(__file__).resolve().with_name("azure-vm-ssh-config.py")
     args = [sys.executable, str(helper), action, "--config", config,
             "--subscription", azure.subscription, "--resource-group", azure.resource_group]
@@ -594,7 +596,8 @@ def preview(plan, resumed, managed_ssh):
         for item in plan["retained"]:
             print(f"  Retain: {item['id']} ({item['reason']})")
     if plan["vm_name"] in managed_ssh:
-        print(f"  Remove this VM's managed SSH entry from {plan['ssh_config']} after confirmed VM absence.")
+        configs = plan["ssh_config"] if isinstance(plan["ssh_config"], list) else [plan["ssh_config"]]
+        print(f"  Remove this VM's managed SSH entries from {', '.join(configs)} after confirmed VM absence.")
 
 
 def confirm(prompt):
@@ -675,7 +678,7 @@ def main():
     parser.add_argument("--resource-group", required=True)
     parser.add_argument("--vm-name", required=True, action="append")
     parser.add_argument("--state-dir", required=True)
-    parser.add_argument("--ssh-config")
+    parser.add_argument("--ssh-config", action="append")
     parser.add_argument("--hosts-file")
     parser.add_argument("--dry-run", action="store_true")
     mode = parser.add_mutually_exclusive_group()
@@ -695,7 +698,10 @@ def main():
     if len({name.lower() for name in args.vm_name}) != len(args.vm_name):
         fail("VM names must be unique")
     state_dir = absolute_path(args.state_dir, "State directory")
-    config = absolute_path(args.ssh_config, "SSH config path") if args.ssh_config else None
+    configs = [absolute_path(path, "SSH config path") for path in args.ssh_config or []]
+    if len(configs) != len(set(configs)):
+        fail("SSH config paths must be unique")
+    config = configs if len(configs) > 1 else (configs[0] if configs else None)
     hosts_file = os.path.abspath(args.hosts_file) if args.hosts_file else None
     hosts_action(hosts_file, "check")
     azure = Azure(subscription, args.resource_group)

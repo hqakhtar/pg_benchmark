@@ -403,7 +403,37 @@ per VM, so completed changes remain recorded if a later operation fails.
 Dry runs and cancelled deletions never change the hosts file.
 
 Keep `AZVM_UPDATE_SSH_CONFIG=true` and configure the matching local private key
-to make the VM names usable as SSH aliases. Keep Ansible's `ansible_user`
+to make the VM names usable as SSH aliases. Split SSH output is the default:
+`sshconfig-pg-benchmark-public.conf` maps each VM name to its public IP, and
+`sshconfig-pg-benchmark-private.conf` maps `VM_NAME-private` to its private IP.
+Both files are created directly in the command's current working directory,
+without a subdirectory, and are Git-ignored when created within this checkout.
+The main `~/.ssh/config` receives only missing `Include` directives; existing
+content is preserved and Includes use absolute paths. Run deletion from the same
+directory or provide the same explicit output paths. Existing files are not
+automatically moved. Paths are configurable with `AZVM_SSH_CONFIG_FILE`,
+`AZVM_SSH_PUBLIC_CONFIG_FILE` and `AZVM_SSH_PRIVATE_CONFIG_FILE`. Explicit relative
+path overrides resolve against the environment file directory. Split mode
+requires public IPs; `AZVM_SSH_CONFIG_MODE=single` explicitly retains legacy
+one-file output for private-only deployments without a controller.
+
+To reuse an existing controller's VNet, set `AZVM_CONTROL_VM` and optionally
+`AZVM_CONTROL_RESOURCE_GROUP`, or pass:
+
+```bash
+./wrapper.sh --azure-create -- --control-vm controller-vm \
+  --control-resource-group controller-rg --dry-run
+```
+
+All runners use the controller's primary NIC subnet unless an explicit subnet
+in that same VNet is selected. Controller deployments require public IPs and
+split SSH output; a conflicting subnet or region stops creation before writes.
+The controller network is never modified or deleted. Connect with `ssh VM_NAME`
+for public access or `ssh VM_NAME-private` from a machine with a private route.
+Deletion removes the VM's owned entries from both files and retains the main
+Include directives. The inventory still contains one original alias per VM.
+
+Keep Ansible's `ansible_user`
 consistent with `AZVM_ADMIN_USER`. VM creation does not run Ansible provisioning;
 use `./wrapper.sh --setup` afterward. Deleting all selected VMs can leave an
 empty hosts file, which setup rejects until new hosts are added.
@@ -953,9 +983,11 @@ configuration isolation, argument forwarding, printed commands, and failures.
 The control-machine suite also mocks package managers and sudo; it checks
 missing-dependency installation, idempotence, privilege handling, and failure
 propagation without installing anything on the test machine.
-The Azure suite requires Python 3, `jq`, and `ssh-keygen`. It uses a fake Azure
+The Azure suite requires Python 3, `jq`, `ssh` and `ssh-keygen`. It uses a fake Azure
 CLI and temporary SSH keys/configuration to test wrapper dispatch, inventory
-preservation, dry runs, confirmations, and partial failures. It does not contact
+preservation, controller-subnet selection, public/private aliases, Include-only
+updates (validated with `ssh -G`), dry runs, confirmations and partial failures.
+It does not contact
 Azure or modify the user's SSH configuration.
 
 The optional provisioning checks also require Ansible, `ansible.posix`, and

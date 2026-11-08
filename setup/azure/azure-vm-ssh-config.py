@@ -9,6 +9,7 @@ import argparse
 import contextlib
 import errno
 import fcntl
+import fnmatch
 import glob
 import ipaddress
 import json
@@ -49,6 +50,14 @@ def absolute_path(value, description):
     return Path(os.path.abspath(value))
 
 
+def same_path(left, right):
+    try:
+        return (left.resolve() == right.resolve()
+                or (left.exists() and right.exists() and left.samefile(right)))
+    except RuntimeError as error:
+        raise ConfigError(f"Cannot resolve SSH path alias: {error}") from error
+
+
 def normalize_scope(subscription, resource_group):
     try:
         subscription = str(uuid.UUID(subscription))
@@ -66,6 +75,10 @@ def validate_name(name):
     return name
 
 
+def entry_alias(record):
+    return record.get("alias", record["vm_name"])
+
+
 def validate_connection(user, port, identity_file, require_key):
     if not isinstance(user, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
         raise ConfigError("invalid SSH username")
@@ -80,10 +93,12 @@ def validate_connection(user, port, identity_file, require_key):
 
 
 def validate_record(record):
-    if not isinstance(record, dict) or set(record) != FIELDS:
+    if not isinstance(record, dict) or set(record) not in (FIELDS, FIELDS | {"alias"}):
         raise ConfigError("managed SSH entry has invalid metadata fields")
     subscription, group = normalize_scope(record["subscription"], record["resource_group"])
     validate_name(record["vm_name"])
+    if "alias" in record and record["alias"] != record["vm_name"] + "-private":
+        raise ConfigError("managed SSH entry has an invalid private alias")
     identity = validate_connection(record["user"], record["port"], record["identity_file"], False)
     try:
         hostname = str(ipaddress.ip_address(record["hostname"]))
@@ -96,22 +111,25 @@ def validate_record(record):
     return normalized
 
 
-def quote_identity(path):
-    # SSH expands percent tokens even in quotes. %% represents a literal %.
-    return '"' + path.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+def quote_path(path, percent_tokens=True):
+    # IdentityFile expands percent tokens, but Include paths are literal.
+    path = path.replace("\\", "\\\\").replace('"', '\\"')
+    if percent_tokens:
+        path = path.replace("%", "%%")
+    return '"' + path + '"'
 
 
 def render(records):
     if not records:
         return b""
     lines = [BEGIN, HEADER]
-    for item in sorted(records, key=lambda entry: entry["vm_name"]):
+    for item in sorted(records, key=entry_alias):
         metadata = json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        body = (f"Host {item['vm_name']}\n"
+        body = (f"Host {entry_alias(item)}\n"
                 f"    HostName {item['hostname']}\n"
                 f"    Port {item['port']}\n"
                 f"    User {item['user']}\n"
-                f"    IdentityFile {quote_identity(item['identity_file'])}\n"
+                f"    IdentityFile {quote_path(item['identity_file'])}\n"
                 "    IdentitiesOnly yes\n\n")
         lines.extend((RECORD + metadata.encode("ascii") + b"\n", body.encode("utf-8")))
     # Restore global matching before the user's original leading directives.
@@ -123,12 +141,17 @@ def split_config(data):
     marker_lines = [line for line in data.splitlines()
                     if line.startswith((b"# BEGIN AZURE-VM-BATCH SSH CONFIG", b"# END AZURE-VM-BATCH SSH CONFIG"))]
     if not marker_lines:
-        return [], data
-    if (not data.startswith(BEGIN) or marker_lines != [BEGIN.rstrip(b"\n"), END.rstrip(b"\n")]
+        return [], data, b""
+    start = data.find(BEGIN)
+    prefix = data[:start] if start >= 0 else b""
+    if (start < 0 or marker_lines != [BEGIN.rstrip(b"\n"), END.rstrip(b"\n")]
             or data.count(END) != 1):
         raise ConfigError("managed SSH section is misplaced, duplicated or malformed; preserve it and inspect the config manually")
+    if any(not re.match(r"\s*(?:Include(?:\s|=)|#|$)", line, re.IGNORECASE)
+           for line in prefix.decode("utf-8", errors="replace").splitlines()):
+        raise ConfigError("managed SSH section follows a Host/Match or other directive; no changes made")
     end = data.index(END) + len(END)
-    section, remainder = data[:end], data[end:]
+    section, remainder = data[start:end], data[end:]
     records = []
     for line in section.splitlines():
         if line.startswith(RECORD):
@@ -137,10 +160,10 @@ def split_config(data):
             except (ValueError, UnicodeDecodeError):
                 raise ConfigError("managed SSH entry metadata is malformed") from None
             records.append(validate_record(record))
-    aliases = [item["vm_name"] for item in records]
+    aliases = [entry_alias(item) for item in records]
     if not records or len(aliases) != len(set(aliases)) or render(records) != section:
         raise ConfigError("managed SSH section was edited or contains duplicate entries; no changes made")
-    return records, remainder
+    return records, remainder, prefix
 
 
 def file_signature(info):
@@ -174,6 +197,9 @@ def check_destination(path):
     # A read-only best-effort permission check; mutations check again under lock.
     if path.is_symlink():
         raise ConfigError(f"SSH config must not be a symlink: {path}")
+    lock = path.with_name(path.name + ".azvm.lock")
+    if lock.is_symlink() or (lock.exists() and (not lock.is_file() or lock.stat().st_nlink != 1)):
+        raise ConfigError(f"SSH config lock must be a single regular file: {lock}")
     parent = path.parent
     while not parent.exists():
         parent = parent.parent
@@ -181,7 +207,11 @@ def check_destination(path):
         raise ConfigError(f"SSH config directory is not writable: {parent}")
 
 
-def include_path(token):
+def include_path(token, known_paths=()):
+    if token in {str(path) for path in known_paths}:
+        return token
+    if os.path.isabs(token) and any(same_path(Path(token), path) for path in known_paths):
+        return token
     # Include accepts environment variables and tokens. Expand only values that
     # are independent of SSH's conditional evaluation; never execute Match exec.
     def environment(match):
@@ -213,13 +243,22 @@ def include_path(token):
     return token
 
 
-def check_manual_aliases(data, selected_names, config_path):
+def check_manual_aliases(data, aliases, config_path, owned_configs=(), scope=None):
     visited = set()
-    selected = {name.lower() for name in selected_names}
+    selected = {name.lower() for name in aliases}
+    owned = {str(path.resolve()) for path in owned_configs}
 
     def scan(contents, origin, depth):
         if depth > 16:
             raise ConfigError("SSH Include nesting is too deep to inspect safely")
+        if str(origin.resolve()) in owned:
+            records, remainder, prefix = split_config(contents)
+            for item in records:
+                alias = entry_alias(item)
+                if alias in selected and ((item["subscription"], item["resource_group"]) != scope
+                                          or item["vm_name"] != aliases[alias]):
+                    raise ConfigError(f"SSH alias {alias} in {origin} belongs to another VM or scope")
+            contents = prefix + remainder
         for line in contents.decode("utf-8", errors="replace").splitlines():
             match = re.match(r"\s*([A-Za-z][A-Za-z0-9]*)\s*(?:=\s*|\s+|$)(.*)", line)
             if not match or match.group(1).lower() not in ("host", "include"):
@@ -234,7 +273,7 @@ def check_manual_aliases(data, selected_names, config_path):
                         raise ConfigError(f"unmanaged SSH Host alias {word!r} already exists in {origin}; choose another VM prefix or resolve that entry manually")
             else:
                 for token in words:
-                    for filename in sorted(glob.glob(include_path(token))):
+                    for filename in sorted(glob.glob(include_path(token, owned_configs))):
                         path = Path(filename)
                         real = str(path.resolve())
                         if real in visited:
@@ -256,11 +295,14 @@ def owned_names(records, scope, names):
             if (item["subscription"], item["resource_group"]) == scope and item["vm_name"] in wanted]
 
 
-def check_add(records, remainder, scope, names, config):
+def check_add(records, remainder, scope, names, config, private=False, owned_configs=()):
+    aliases = {name + ("-private" if private else ""): name for name in names}
     for item in records:
         if item["vm_name"] in names and (item["subscription"], item["resource_group"]) != scope:
             raise ConfigError(f"SSH alias {item['vm_name']} belongs to another subscription/resource group")
-    check_manual_aliases(remainder, names, config)
+        if entry_alias(item) in aliases and item["vm_name"] != aliases[entry_alias(item)]:
+            raise ConfigError(f"SSH alias {entry_alias(item)} belongs to another VM")
+    check_manual_aliases(remainder, aliases, config, owned_configs, scope)
 
 
 @contextlib.contextmanager
@@ -311,10 +353,117 @@ def atomic_write(config, data, original, signature):
             os.unlink(filename)
 
 
+def add_includes(original, configs):
+    for config in configs:
+        if "${" in str(config) or any(char in str(config) for char in "*?[]"):
+            raise ConfigError("SSH Include destinations cannot contain environment expansions or glob characters")
+    covered = set()
+    for line in original.decode("utf-8", errors="replace").splitlines():
+        match = re.match(r"\s*([A-Za-z][A-Za-z]*)\s*(?:=\s*|\s+|$)(.*)", line)
+        if not match:
+            continue
+        directive = match.group(1).lower()
+        if directive in ("host", "match"):
+            break
+        if directive == "include":
+            try:
+                tokens = shlex.split(match.group(2), comments=True, posix=True)
+            except ValueError:
+                raise ConfigError("Cannot parse a main SSH Include directive") from None
+            for token in tokens:
+                pattern = include_path(token, configs)
+                covered.update(config for config in configs
+                               if fnmatch.fnmatchcase(str(config), pattern) or same_path(config, Path(pattern)))
+    newline = b"\r\n" if b"\r\n" in original else b"\n"
+    additions = [("Include " + quote_path(str(config), percent_tokens=False)).encode("utf-8") + newline
+                 for config in configs if config not in covered]
+    return b"".join(additions) + original
+
+
+def pair_action(args, config, scope, names, identity):
+    public = absolute_path(args.public_config, "Public SSH config path")
+    private = absolute_path(args.private_config, "Private SSH config path")
+    configs = (public, private)
+    paths = (config, *configs)
+    if same_path(public, private) or any(same_path(config, path) for path in configs):
+        raise ConfigError("Main, public and private SSH config paths must be different")
+    adding = args.action in ("check-add-pair", "add-pair")
+    if adding and any(same_path(path, Path(identity)) for path in paths):
+        raise ConfigError("SSH config destinations must not overwrite the private key")
+    for path in paths if adding else configs:
+        check_destination(path)
+
+    def read_and_check():
+        states = {}
+        for path in configs:
+            original, signature = read_config(path)
+            records, remainder, prefix = split_config(original)
+            states[path] = (records, remainder, prefix, original, signature)
+            if adding:
+                check_add(records, prefix + remainder, scope, names, path,
+                          private=path == private, owned_configs=configs)
+        main, main_signature = (read_config(config) if adding else (b"", None))
+        if adding:
+            aliases = {alias: name for name in names for alias in (name, name + "-private")}
+            check_manual_aliases(main, aliases, config, configs, scope)
+            main = add_includes(main, configs)
+        return states, main, main_signature
+
+    states, main, main_signature = read_and_check()
+    managed = sorted({name for state in states.values() for name in owned_names(state[0], scope, names)})
+    if args.action.startswith("check-"):
+        print(json.dumps({"managed_vm_names": managed}))
+        return
+    if not adding and not managed:
+        print(json.dumps({"changed": False, "managed_vm_names": []}))
+        return
+    addresses = {}
+    if adding:
+        for path, value in ((public, args.hostname), (private, args.private_hostname)):
+            try:
+                address = ipaddress.ip_address(value)
+            except (ValueError, TypeError):
+                raise ConfigError("Both public and private SSH hostnames must be valid IP addresses") from None
+            if address.version != 4:
+                raise ConfigError("Public/private runner SSH configurations require IPv4 addresses")
+            addresses[path] = str(address)
+    changed = False
+    with contextlib.ExitStack() as locks:
+        for path in sorted(paths if adding else configs, key=lambda path: str(path.resolve())):
+            locks.enter_context(mutation_lock(path))
+        states, main, main_signature = read_and_check()
+        for path in configs:
+            records, remainder, prefix, original, signature = states[path]
+            records = [item for item in records
+                       if not (item["vm_name"] == names[0]
+                               and (item["subscription"], item["resource_group"]) == scope)]
+            if adding:
+                record = dict(subscription=scope[0], resource_group=scope[1], vm_name=names[0],
+                              hostname=addresses[path], port=args.port, user=args.user, identity_file=identity)
+                if path == private:
+                    record["alias"] = names[0] + "-private"
+                records.append(record)
+            result = prefix + render(records) + remainder
+            if result != original:
+                atomic_write(path, result, original, signature)
+                changed = True
+        if adding:
+            original, signature = read_config(config)
+            if signature != main_signature:
+                raise ConfigError("Main SSH config changed concurrently; retry Include insertion")
+            if main != original:
+                atomic_write(config, main, original, signature)
+                changed = True
+    print(json.dumps({"changed": changed, "managed_vm_names": names if adding else []}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("check-add", "check-remove", "add", "remove"))
+    parser.add_argument("action", choices=("check-add", "check-remove", "add", "remove",
+                                         "check-add-pair", "check-remove-pair", "add-pair", "remove-pair"))
     parser.add_argument("--config", required=True)
+    parser.add_argument("--public-config")
+    parser.add_argument("--private-config")
     parser.add_argument("--subscription", required=True)
     parser.add_argument("--resource-group", required=True)
     parser.add_argument("--vm-name", required=True, action="append")
@@ -322,21 +471,30 @@ def main():
     parser.add_argument("--port", type=int)
     parser.add_argument("--identity-file")
     parser.add_argument("--hostname")
+    parser.add_argument("--private-hostname")
     args = parser.parse_args()
     config = absolute_path(args.config, "SSH config path")
     scope = normalize_scope(args.subscription, args.resource_group)
     names = [validate_name(name) for name in args.vm_name]
     if len(set(names)) != len(names):
         raise ConfigError("VM names must be unique")
-    if args.action in ("add", "remove") and len(names) != 1:
+    if args.action in ("add", "remove", "add-pair", "remove-pair") and len(names) != 1:
         raise ConfigError("add/remove accepts exactly one --vm-name")
-    if args.action in ("add", "check-add"):
+    identity = None
+    if args.action in ("add", "check-add", "add-pair", "check-add-pair"):
         identity = validate_connection(args.user, args.port, args.identity_file, True)
+    if args.action.endswith("-pair"):
+        if not args.public_config or not args.private_config:
+            raise ConfigError("Paired SSH actions require public and private config paths")
+        pair_action(args, config, scope, names, identity)
+        return
+    if args.public_config or args.private_config or args.private_hostname:
+        raise ConfigError("Public/private config options require a paired SSH action")
     check_destination(config)
     original, signature = read_config(config)
-    records, remainder = split_config(original)
+    records, remainder, prefix = split_config(original)
     if args.action == "check-add":
-        check_add(records, remainder, scope, names, config)
+        check_add(records, prefix + remainder, scope, names, config)
     if args.action.startswith("check-"):
         print(json.dumps({"managed_vm_names": owned_names(records, scope, names)}))
         return
@@ -350,16 +508,16 @@ def main():
             raise ConfigError("--hostname must be a valid IPv4 or IPv6 address") from None
     with mutation_lock(config):
         original, signature = read_config(config)
-        records, remainder = split_config(original)
+        records, remainder, prefix = split_config(original)
         if args.action == "add":
-            check_add(records, remainder, scope, names, config)
+            check_add(records, prefix + remainder, scope, names, config)
             records = [item for item in records if item["vm_name"] != names[0]]
             records.append(dict(subscription=scope[0], resource_group=scope[1], vm_name=names[0],
                                 hostname=hostname, port=args.port, user=args.user, identity_file=identity))
         else:
             records = [item for item in records
                        if not (item["vm_name"] == names[0] and (item["subscription"], item["resource_group"]) == scope)]
-        result = render(records) + remainder
+        result = prefix + render(records) + remainder
         changed = result != original
         if changed:
             atomic_write(config, result, original, signature)

@@ -6,6 +6,11 @@
 /unwanted/hosts.txt*
 /setup/ansible/inventory.local.ini
 /setup/ansible/vars.local.yml
+# Generated Azure SSH configs and locks, wherever invoked within this checkout.
+sshconfig-pg-benchmark-public.conf
+sshconfig-pg-benchmark-private.conf
+sshconfig-pg-benchmark-public.conf.azvm.lock
+sshconfig-pg-benchmark-private.conf.azvm.lock
 # Runtime configuration is private; only environment templates are shipped.
 *.[eE][nN][vV]
 *.[eE][nN][vV].*

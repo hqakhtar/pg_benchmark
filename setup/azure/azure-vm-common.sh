@@ -55,8 +55,10 @@ allowed = {
     "AZVM_OS_DISK_SIZE", "AZVM_STORAGE_SKU", "AZVM_SECURITY_TYPE",
     "AZVM_ACCELERATED_NETWORKING", "AZVM_SSH_SOURCE", "AZVM_PUBLIC_IP",
     "AZVM_SUBNET_ID", "AZVM_VNET_CIDR", "AZVM_SUBNET_CIDR",
+    "AZVM_CONTROL_VM", "AZVM_CONTROL_RESOURCE_GROUP",
     "AZVM_UPDATE_SSH_CONFIG", "AZVM_SSH_CONFIG_FILE", "AZVM_SSH_PRIVATE_KEY",
-    "AZVM_SSH_PORT", "AZVM_SSH_ADDRESS",
+    "AZVM_SSH_PORT", "AZVM_SSH_ADDRESS", "AZVM_SSH_CONFIG_MODE",
+    "AZVM_SSH_PUBLIC_CONFIG_FILE", "AZVM_SSH_PRIVATE_CONFIG_FILE",
 }
 filename = os.path.abspath(sys.argv[1])
 user_home = sys.argv[2]
@@ -178,6 +180,7 @@ PY
     done < <(jq -j '.values | to_entries[] | .key, "\u0000", .value, "\u0000"' <<< "$azvm_json")
     AZVM_ENV_FILE=$azvm_file
     AZVM_ENV_DIR=$azvm_dir
+    AZVM_WORK_DIR=$(pwd -P) || { azvm_config_error 'Cannot resolve the current working directory.'; return 1; }
     # The guarded expansion also works with nounset in Bash 4.0 through 4.3.
     AZVM_SCRIPT_ARGS=(${azvm_remaining[@]+"${azvm_remaining[@]}"})
 }
@@ -200,4 +203,43 @@ azvm_hosts_action() {
     [[ -n ${HOSTS_FILE:-} ]] || return 0
     python3 "$SCRIPT_DIR/azure-vm-hosts.py" "$1" "$HOSTS_FILE" "${@:2}" ||
         { azvm_config_error "Runner hosts operation failed ($1): $HOSTS_FILE"; return 1; }
+}
+
+azvm_ssh_config_settings() {
+    case $SSH_CONFIG_MODE in
+        split|single) ;;
+        *) azvm_config_error '--ssh-config-mode / AZVM_SSH_CONFIG_MODE must be split or single.'; return 1 ;;
+    esac
+    if [[ -n $CONTROL_VM && -z $UPDATE_SSH_CONFIG_SET ]]; then
+        UPDATE_SSH_CONFIG=true
+    fi
+    case $UPDATE_SSH_CONFIG in
+        true|false) ;;
+        *) azvm_config_error '--update-ssh-config / AZVM_UPDATE_SSH_CONFIG must be true or false.'; return 1 ;;
+    esac
+    [[ $UPDATE_SSH_CONFIG == true ]] || return 0
+    [[ -n $SSH_CONFIG_FILE ]] || { azvm_config_error '--ssh-config-file must not be empty.'; return 1; }
+    SSH_CONFIG_FILE=$(azvm_resolve_path "$SSH_CONFIG_FILE") || return 1
+    if [[ $SSH_CONFIG_MODE == split ]]; then
+        [[ -n $SSH_PUBLIC_CONFIG_FILE && -n $SSH_PRIVATE_CONFIG_FILE ]] || {
+            azvm_config_error 'Split SSH configuration requires public and private config paths.'; return 1;
+        }
+        SSH_PUBLIC_CONFIG_FILE=$(azvm_resolve_path "$SSH_PUBLIC_CONFIG_FILE") || return 1
+        SSH_PRIVATE_CONFIG_FILE=$(azvm_resolve_path "$SSH_PRIVATE_CONFIG_FILE") || return 1
+    fi
+}
+
+azvm_ssh_scope_args() {
+    SSH_SCOPE_ARGS=(--config "$SSH_CONFIG_FILE" --subscription "$SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP")
+    SSH_CHECK_ADD_ACTION=check-add
+    SSH_ADD_ACTION=add
+    SSH_CHECK_REMOVE_ACTION=check-remove
+    SSH_REMOVE_ACTION=remove
+    if [[ $SSH_CONFIG_MODE == split ]]; then
+        SSH_SCOPE_ARGS+=(--public-config "$SSH_PUBLIC_CONFIG_FILE" --private-config "$SSH_PRIVATE_CONFIG_FILE")
+        SSH_CHECK_ADD_ACTION=check-add-pair
+        SSH_ADD_ACTION=add-pair
+        SSH_CHECK_REMOVE_ACTION=check-remove-pair
+        SSH_REMOVE_ACTION=remove-pair
+    fi
 }

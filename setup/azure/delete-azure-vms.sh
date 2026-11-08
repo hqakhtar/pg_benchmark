@@ -34,8 +34,19 @@ Options:
   --start N               First index (1..20; default: 1); final index <=20.
   --digits N              Must be 2; retained for compatibility.
   --subnet-id ID          Existing subnet used at creation; preserves its network.
+  --control-vm NAME       Controller used at creation; always preserves its network.
+  --control-resource-group NAME
+                         Controller's group; does not require controller lookup.
   --update-ssh-config BOOL Remove matching managed SSH entries (default: false).
-  --ssh-config-file PATH  Default: $HOME/.ssh/config; same file used at creation.
+  --ssh-config-mode MODE  split (default) or single (legacy); same as creation.
+  --ssh-config-file PATH  Main Include file in split mode (never edited on deletion);
+                         legacy output in single mode. Default: $HOME/.ssh/config.
+  --ssh-public-config-file PATH
+                         Default: sshconfig-pg-benchmark-public.conf in the
+                         command's current working directory.
+  --ssh-private-config-file PATH
+                         Default: sshconfig-pg-benchmark-private.conf in the
+                         command's current working directory.
   --hosts-file PATH       Remove confirmed absent/deleted VM aliases from this
                          plain hosts file, preserving unrelated hosts.
                          Relative paths use the current directory.
@@ -57,9 +68,13 @@ Environment-file example (edit the file first):
   ./delete-azure-vms.sh --env-file ./azure-vms.env --interactive
 
 Reads AZVM_SUBSCRIPTION, AZVM_RESOURCE_GROUP, AZVM_NAME_PREFIX, AZVM_COUNT,
-AZVM_START, AZVM_DIGITS, AZVM_SUBNET_ID, AZVM_UPDATE_SSH_CONFIG and
-AZVM_SSH_CONFIG_FILE from the selected file. CLI arguments override the file;
+AZVM_START, AZVM_DIGITS, AZVM_SUBNET_ID, AZVM_CONTROL_VM, AZVM_CONTROL_RESOURCE_GROUP,
+AZVM_UPDATE_SSH_CONFIG, AZVM_SSH_CONFIG_MODE, AZVM_SSH_CONFIG_FILE,
+AZVM_SSH_PUBLIC_CONFIG_FILE and AZVM_SSH_PRIVATE_CONFIG_FILE from the selected file.
+CLI arguments override the file;
 inherited AZVM_* variables are ignored. Relative paths use the file's directory.
+Default split SSH files use the command's working directory instead. Run from
+the creation directory or provide the same explicit public/private config paths.
 Confirmation, keep-network and dry-run switches are explicit CLI actions.
 VM numeric suffixes are always exactly two digits, from 01 through 20.
 
@@ -113,8 +128,15 @@ COUNT=${AZVM_COUNT-}
 START=${AZVM_START-1}
 DIGITS=${AZVM_DIGITS-2}
 SUBNET_ID=${AZVM_SUBNET_ID-}
+CONTROL_VM=${AZVM_CONTROL_VM-}
+CONTROL_RESOURCE_GROUP=${AZVM_CONTROL_RESOURCE_GROUP-}
 UPDATE_SSH_CONFIG=${AZVM_UPDATE_SSH_CONFIG-false}
+UPDATE_SSH_CONFIG_SET=${AZVM_UPDATE_SSH_CONFIG+set}
 SSH_CONFIG_FILE=${AZVM_SSH_CONFIG_FILE-$HOME/.ssh/config}
+SSH_CONFIG_MODE=${AZVM_SSH_CONFIG_MODE-split}
+WORKING_DIRECTORY=${AZVM_WORK_DIR-$PWD}
+SSH_PUBLIC_CONFIG_FILE=${AZVM_SSH_PUBLIC_CONFIG_FILE-$WORKING_DIRECTORY/sshconfig-pg-benchmark-public.conf}
+SSH_PRIVATE_CONFIG_FILE=${AZVM_SSH_PRIVATE_CONFIG_FILE-$WORKING_DIRECTORY/sshconfig-pg-benchmark-private.conf}
 INTERACTIVE=false; YES=false; DRY_RUN=false; KEEP_NETWORK=false
 HOSTS_FILE=''
 INCLUDE_UNMANAGED=false; DELETE_STATE_DIR_SET=false
@@ -128,8 +150,13 @@ while (( $# )); do
     --start) need_value "$@"; START=$2; shift 2 ;;
     --digits) need_value "$@"; DIGITS=$2; shift 2 ;;
     --subnet-id) need_value "$@"; SUBNET_ID=$2; shift 2 ;;
-    --update-ssh-config) need_value "$@"; UPDATE_SSH_CONFIG=$2; shift 2 ;;
+    --control-vm) need_value "$@"; CONTROL_VM=$2; shift 2 ;;
+    --control-resource-group) need_value "$@"; CONTROL_RESOURCE_GROUP=$2; shift 2 ;;
+    --update-ssh-config) need_value "$@"; UPDATE_SSH_CONFIG=$2; UPDATE_SSH_CONFIG_SET=set; shift 2 ;;
     --ssh-config-file) need_value "$@"; SSH_CONFIG_FILE=$2; shift 2 ;;
+    --ssh-config-mode) need_value "$@"; SSH_CONFIG_MODE=$2; shift 2 ;;
+    --ssh-public-config-file) need_value "$@"; SSH_PUBLIC_CONFIG_FILE=$2; shift 2 ;;
+    --ssh-private-config-file) need_value "$@"; SSH_PRIVATE_CONFIG_FILE=$2; shift 2 ;;
     --hosts-file) need_value "$@"; HOSTS_FILE=$2; shift 2 ;;
     --include-unmanaged) INCLUDE_UNMANAGED=true; shift ;;
     --delete-state-dir) need_value "$@"; DELETE_STATE_DIR=$2; DELETE_STATE_DIR_SET=true; shift 2 ;;
@@ -159,11 +186,17 @@ END=$((START + COUNT - 1))
 (( END <= 20 )) || die 'The final VM index (start + count - 1) must not exceed 20; suffixes are limited to 01..20.'
 [[ $YES == false || $INTERACTIVE == false ]] || die '--yes and --interactive cannot be combined.'
 [[ $DELETE_STATE_DIR_SET == false || $INCLUDE_UNMANAGED == true ]] || die '--delete-state-dir is only used with --include-unmanaged.'
-case $UPDATE_SSH_CONFIG in true|false) ;; *) die '--update-ssh-config / AZVM_UPDATE_SSH_CONFIG must be true or false.' ;; esac
+[[ -n $CONTROL_VM || -z $CONTROL_RESOURCE_GROUP ]] || die '--control-resource-group requires --control-vm.'
+if [[ -n $CONTROL_VM ]]; then
+  [[ $CONTROL_VM =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$ ]] || die 'Invalid --control-vm name.'
+  CONTROL_RESOURCE_GROUP=${CONTROL_RESOURCE_GROUP:-$RESOURCE_GROUP}
+  [[ $CONTROL_RESOURCE_GROUP =~ ^[a-zA-Z0-9._\(\)-]+$ && ${#CONTROL_RESOURCE_GROUP} -le 90 && $CONTROL_RESOURCE_GROUP != *. ]] ||
+    die 'Invalid --control-resource-group name.'
+fi
+azvm_ssh_config_settings || die 'Invalid local SSH configuration settings.'
 if [[ $UPDATE_SSH_CONFIG == true ]]; then
   [[ -r $SCRIPT_DIR/azure-vm-ssh-config.py ]] || die 'Missing azure-vm-ssh-config.py; keep all package files together.'
   [[ -n $SSH_CONFIG_FILE ]] || die 'AZVM_SSH_CONFIG_FILE / --ssh-config-file must not be empty.'
-  SSH_CONFIG_FILE=$(azvm_resolve_path "$SSH_CONFIG_FILE") || die 'Cannot resolve the SSH config path.'
 fi
 
 SUBSCRIPTION_JSON=$(az account show --subscription "$SUBSCRIPTION" --query id \
@@ -180,7 +213,13 @@ if [[ $INCLUDE_UNMANAGED == true ]]; then
     printf -v name '%s%02d' "$PREFIX" "$i"
     ATTACHED_ARGS+=(--vm-name "$name")
   done
-  if [[ $UPDATE_SSH_CONFIG == true ]]; then ATTACHED_ARGS+=(--ssh-config "$SSH_CONFIG_FILE"); fi
+  if [[ $UPDATE_SSH_CONFIG == true ]]; then
+    if [[ $SSH_CONFIG_MODE == split ]]; then
+      ATTACHED_ARGS+=(--ssh-config "$SSH_PUBLIC_CONFIG_FILE" --ssh-config "$SSH_PRIVATE_CONFIG_FILE")
+    else
+      ATTACHED_ARGS+=(--ssh-config "$SSH_CONFIG_FILE")
+    fi
+  fi
   if [[ -n $HOSTS_FILE ]]; then ATTACHED_ARGS+=(--hosts-file "$HOSTS_FILE"); fi
   if [[ $DRY_RUN == true ]]; then ATTACHED_ARGS+=(--dry-run); fi
   if [[ $INTERACTIVE == true ]]; then ATTACHED_ARGS+=(--interactive); fi
@@ -190,13 +229,13 @@ if [[ $INCLUDE_UNMANAGED == true ]]; then
 fi
 SSH_CONFIG_NAMES_JSON='[]'
 if [[ $UPDATE_SSH_CONFIG == true ]]; then
-  SSH_SCOPE_ARGS=(--config "$SSH_CONFIG_FILE" --subscription "$SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP")
+  azvm_ssh_scope_args
   SSH_CHECK_ARGS=("${SSH_SCOPE_ARGS[@]}")
   for ((i=START; i<=END; i++)); do
     printf -v name '%s%02d' "$PREFIX" "$i"
     SSH_CHECK_ARGS+=(--vm-name "$name")
   done
-  SSH_STATE=$(python3 "$SCRIPT_DIR/azure-vm-ssh-config.py" check-remove "${SSH_CHECK_ARGS[@]}") ||
+  SSH_STATE=$(python3 "$SCRIPT_DIR/azure-vm-ssh-config.py" "$SSH_CHECK_REMOVE_ACTION" "${SSH_CHECK_ARGS[@]}") ||
     die 'Local SSH config preflight failed; no resources were changed.'
   SSH_CONFIG_NAMES_JSON=$(jq -ecj '.managed_vm_names | select(type == "array" and all(.[]; type == "string"))' <<< "$SSH_STATE") ||
     die 'Invalid response from the local SSH config helper.'
@@ -348,6 +387,10 @@ inspect_network() {
     NETWORK_REASON='--keep-network was specified'
     return 0
   fi
+  if [[ -n $CONTROL_VM ]]; then
+    NETWORK_REASON='the controller network is external and must be preserved'
+    return 0
+  fi
   if [[ -n $SUBNET_ID ]]; then
     NETWORK_REASON='an existing subnet was supplied through --subnet-id / AZVM_SUBNET_ID'
     return 0
@@ -435,7 +478,7 @@ confirm() {
 check_live_ssh_entry() {
   local name=$1 expected=$2 state present
   [[ $UPDATE_SSH_CONFIG == true ]] || return 0
-  state=$(python3 "$SCRIPT_DIR/azure-vm-ssh-config.py" check-remove "${SSH_SCOPE_ARGS[@]}" --vm-name "$name") ||
+  state=$(python3 "$SCRIPT_DIR/azure-vm-ssh-config.py" "$SSH_CHECK_REMOVE_ACTION" "${SSH_SCOPE_ARGS[@]}" --vm-name "$name") ||
     die "Cannot recheck the SSH config entry for $name; no deletion of this VM was attempted."
   present=$(jq -erj --arg name "$name" '(.managed_vm_names | index($name) != null) | tostring' <<< "$state") ||
     die 'Invalid response from the local SSH config helper.'
@@ -444,7 +487,7 @@ check_live_ssh_entry() {
 
 remove_ssh_entry() {
   local name=$1 result
-  result=$(python3 "$SCRIPT_DIR/azure-vm-ssh-config.py" remove "${SSH_SCOPE_ARGS[@]}" --vm-name "$name") ||
+  result=$(python3 "$SCRIPT_DIR/azure-vm-ssh-config.py" "$SSH_REMOVE_ACTION" "${SSH_SCOPE_ARGS[@]}" --vm-name "$name") ||
     die "VM $name is absent/deleted, but its local SSH entry could not be removed. Inspect the config and rerun deletion."
   if jq -e '.changed == true' >/dev/null <<< "$result"; then
     SSH_REMOVED=$((SSH_REMOVED + 1))
@@ -456,7 +499,13 @@ load_inventory
 NAMES=(); SIGNATURES=(); SSH_SELECTED=(); SELECTED_NIC_IDS=(); ANY=false; NETWORK_PLANNED=false
 printf 'Subscription: %s\nResource group: %s\n' "$SUBSCRIPTION_ID" "$RESOURCE_GROUP"
 printf 'Settings file: %s\n' "$AZVM_ENV_FILE"
-if [[ $UPDATE_SSH_CONFIG == true ]]; then printf 'Managed SSH config: %s\n' "$SSH_CONFIG_FILE"; fi
+if [[ $UPDATE_SSH_CONFIG == true ]]; then
+  if [[ $SSH_CONFIG_MODE == split ]]; then
+    printf 'Managed SSH configs: public=%s; private=%s (main Includes retained)\n' "$SSH_PUBLIC_CONFIG_FILE" "$SSH_PRIVATE_CONFIG_FILE"
+  else
+    printf 'Managed SSH config: %s\n' "$SSH_CONFIG_FILE"
+  fi
+fi
 printf 'Deletion plan (OS disk contents will be permanently deleted):\n'
 for ((i=START; i<=END; i++)); do
   printf -v name '%s%02d' "$PREFIX" "$i"
