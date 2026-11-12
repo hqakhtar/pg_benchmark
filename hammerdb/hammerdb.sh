@@ -180,13 +180,21 @@ benchmark_run()
     hammerdb_execute run "$directory"
 
     # Accept one unambiguous result and retain HammerDB's native metric units.
-    local line count=0 nopm="" tpm="" version=""
+    local line count=0 nopm="" tpm="" version="" result_nopm result_tpm
     local result_pattern='TEST RESULT[[:space:]]*:[[:space:]]*System achieved ((0|[1-9][0-9]*)([.][0-9]+)?) NOPM from ((0|[1-9][0-9]*)([.][0-9]+)?) PostgreSQL TPM'
     while IFS= read -r line; do
         if [[ "$line" =~ $result_pattern ]];
         then
-            nopm="${BASH_REMATCH[1]}"
-            tpm="${BASH_REMATCH[4]}"
+            result_nopm="${BASH_REMATCH[1]}"
+            result_tpm="${BASH_REMATCH[4]}"
+            if ((count > 0)) && [[ "$result_nopm" != "$nopm" || "$result_tpm" != "$tpm" ]];
+            then
+                fail "Conflicting HammerDB results in $directory/hammerdb.log: $nopm NOPM / $tpm TPM versus $result_nopm NOPM / $result_tpm TPM"
+                return 1
+            fi
+
+            nopm="$result_nopm"
+            tpm="$result_tpm"
             count=$((count + 1))
         fi
 
@@ -196,11 +204,16 @@ benchmark_run()
         fi
 
     done <"$directory/hammerdb.log"
-    [[ "$count" == 1 && -n "$version" ]] ||
+    [[ "$count" -ge 1 && -n "$version" ]] ||
     {
-        fail "Expected one valid NOPM/TPM result and a HammerDB version; found $count result(s)"
+        fail "Expected at least one valid NOPM/TPM result and a HammerDB version; found $count result(s)"
         return 1
     }
+
+    if ((count > 1));
+    then
+        printf 'WARNING: HammerDB reported %s identical result lines; recording one NOPM/TPM measurement.\n' "$count" >&2
+    fi
 
     {
         printf '{\n'

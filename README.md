@@ -748,6 +748,11 @@ configuration and virtual users. The runner stops subsequent iterations and
 retains the logs. Interruptions terminate the adapter's owned process group and
 record an interrupted run.
 
+Repeated result lines with identical NOPM and TPM values are recorded as one
+measurement with a warning. Different NOPM or TPM values in the same iteration
+remain ambiguous and fail the run; results are never summed or arbitrarily
+selected. A HammerDB version is required in either case.
+
 ### Watch for worker failures in another terminal
 
 Use `--monitor` with Python 3 on the machine that can read the logs. With no

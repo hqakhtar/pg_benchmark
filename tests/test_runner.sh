@@ -689,17 +689,42 @@ assert test "$status" == 37
 assert test "$(trace_count '^run|')" == 1
 pass 'native prepare/run failures preserve status and stop subsequent iterations'
 
-for setting in TEST_MISSING_COMPLETION TEST_NO_METRICS TEST_DUPLICATE_METRICS; do
+for setting in TEST_MISSING_COMPLETION TEST_NO_METRICS TEST_NO_VERSION; do
     EXTRA_ENV=("$setting=1")
     invoke hammerdb
     assert test "$status" != 0
     directory="$(last_run)"
     assert jq -e '.status == "failed" and .completed_iterations == 0' "$directory/run.json"
 done
+pass 'result parsing requires valid metrics and a HammerDB version'
+
+EXTRA_ENV=("TEST_DUPLICATE_METRICS=1" "RUN_ITERATIONS=1")
+invoke hammerdb
+assert test "$status" == 0
+directory="$(last_run)"
+assert jq -e '.status == "succeeded" and .completed_iterations == 1' "$directory/run.json"
+assert jq -e '.tool_version == "v5.0-test" and
+    .metrics.nopm.value == 123.5 and .metrics.tpm.value == 456' \
+    "$directory/iteration-1/result.json"
+assert grep -Fq 'WARNING: HammerDB reported 2 identical result lines' "$TEST_ROOT/current.log"
+pass 'identical result summaries produce one measurement with an explicit warning'
+
+for metric in nopm tpm
+do
+    EXTRA_ENV=("TEST_CONFLICTING_METRICS=$metric" "RUN_ITERATIONS=1")
+    invoke hammerdb
+    assert test "$status" != 0
+    directory="$(last_run)"
+    assert jq -e '.status == "failed" and .completed_iterations == 0' "$directory/run.json"
+    assert test ! -e "$directory/iteration-1/result.json"
+    assert grep -Fq 'Conflicting HammerDB results' "$TEST_ROOT/current.log"
+done
+pass 'conflicting NOPM or TPM summaries fail without producing a result'
+
 EXTRA_ENV=("TEST_VU_FAIL=1")
 invoke hammerdb
 assert test "$status" == 0
-pass 'result parsing rejects missing or ambiguous metrics without revalidating virtual-user status'
+pass 'virtual-user status validation remains delegated to HammerDB'
 
 EXTRA_ENV=("TEST_PSQL_FAIL=true")
 invoke hammerdb

@@ -1,4 +1,6 @@
-puts "HammerDB CLI v5.0-test"
+if {![info exists ::env(TEST_NO_VERSION)]} {
+    puts "HammerDB CLI v5.0-test"
+}
 
 set configpostgresql [dict create \
     connection [dict create pg_host "" pg_port "" pg_sslmode "" pg_azure_citus false \
@@ -88,6 +90,13 @@ proc run_phase {phase} {
         puts "Vuser 1:TEST RESULT : System achieved 123.5 NOPM from 456 PostgreSQL TPM"
         if {[info exists ::env(TEST_DUPLICATE_METRICS)]} {
             puts "Vuser 1:TEST RESULT : System achieved 123.5 NOPM from 456 PostgreSQL TPM"
+        }
+        if {[info exists ::env(TEST_CONFLICTING_METRICS)]} {
+            if {$::env(TEST_CONFLICTING_METRICS) eq "nopm"} {
+                puts "Vuser 1:TEST RESULT : System achieved 124.5 NOPM from 456 PostgreSQL TPM"
+            } else {
+                puts "Vuser 1:TEST RESULT : System achieved 123.5 NOPM from 457 PostgreSQL TPM"
+            }
         }
     }
 }
