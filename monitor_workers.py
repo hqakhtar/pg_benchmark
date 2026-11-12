@@ -2,6 +2,7 @@
 """Watch loader or benchmark artifacts without interfering with the run."""
 
 import argparse
+from datetime import datetime
 import json
 import math
 import os
@@ -174,6 +175,14 @@ def newest_directory(run_root, label, load_root):
     return max(candidates)[-1].resolve()
 
 
+def load_started_at(directory):
+    match = re.fullmatch(r"load-(\d{8}T\d{6}Z)-\d+-\d+", directory.name)
+    if match is None:
+        raise ValueError(f"Load directory has no start timestamp: {directory}")
+    datetime.strptime(match[1], "%Y%m%dT%H%M%SZ")
+    return match[1]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -183,6 +192,10 @@ def main(argv=None):
     parser.add_argument("--run-output-root", type=Path, help="configured benchmark root")
     parser.add_argument("--run-label", help="configured benchmark run label")
     parser.add_argument("--load-log-root", type=Path, help="configured load log root")
+    parser.add_argument(
+        "--print-started-at", action="store_true",
+        help="print the selected load directory's UTC start timestamp and exit",
+    )
     parser.add_argument(
         "--interval", type=positive_seconds, default=2.0,
         help="poll interval in seconds (default: 2)",
@@ -213,6 +226,14 @@ def main(argv=None):
         for directory in monitor.directories:
             if not directory.is_dir():
                 parser.error(f"not a directory: {directory}")
+        if args.print_started_at:
+            if len(monitor.directories) != 1:
+                parser.error("--print-started-at requires exactly one load directory")
+            directory = monitor.directories[0]
+            started_at = load_started_at(directory)
+            print(f"Load logs: {directory} (started at {started_at})", file=sys.stderr)
+            print(started_at)
+            return 0
         print(
             "Monitoring: " + ", ".join(map(str, monitor.directories))
             + f" (every {args.interval:g}s; Ctrl-C to stop)",

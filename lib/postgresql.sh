@@ -2,9 +2,14 @@
 
 postgresql_validate()
 {
-    if [[ "$RUN_ACTION" == verify && "$PG_TARGET_MODE" != existing ]]
+    local existing_action=""
+    case "$RUN_ACTION" in
+        verify) existing_action=Verification ;;
+        monitor-data-loading) existing_action="Warehouse watching" ;;
+    esac
+    if [[ -n "$existing_action" && "$PG_TARGET_MODE" != existing ]]
     then
-        fail "Verification requires PG_TARGET_MODE=existing"
+        fail "$existing_action requires PG_TARGET_MODE=existing"
         return 1
     fi
 

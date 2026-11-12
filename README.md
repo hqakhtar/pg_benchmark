@@ -264,6 +264,8 @@ wrapper.sh BENCHMARK [--check | --prepare | --load | --verify | --cleanup]
     [--benchmark-env FILE]
     [--run-env FILE]
 wrapper.sh --verify [--connection-env FILE] [--benchmark-env FILE] [--run-env FILE]
+wrapper.sh --monitor-data-loading [--interval SECONDS] [--log-dir DIR] [--started-at TIMESTAMP]
+    [--connection-env FILE]
 wrapper.sh --setup-control-machine
 wrapper.sh --setup [--host HOST] [-- ANSIBLE_OPTIONS]
 wrapper.sh --update-hammerdb [--host HOST] [-- ANSIBLE_OPTIONS]
@@ -634,6 +636,73 @@ psql -X -v expected_warehouses=100000 -v first_warehouse=1 \
 The helper uses a read-only transaction and enables `ON_ERROR_STOP`, so a
 failed coverage check also makes standalone psql exit nonzero.
 
+## Monitoring data loading
+
+Run the warehouse progress query immediately, then repeat it every five seconds:
+
+```bash
+./wrapper.sh --monitor-data-loading --interval 5
+# Select a specific load rather than the newest one:
+./wrapper.sh --monitor-data-loading --interval 5 \
+    --log-dir ./logs/load-20261109T075942Z-12345-6789
+# Override the start time (also works without local logs):
+./wrapper.sh --monitor-data-loading --interval 5 --started-at 20261109T075942Z
+# Select a different private connection file:
+./wrapper.sh --monitor-data-loading --interval 5 \
+    --connection-env "$HOME/bench-config/connection.env"
+```
+
+`--interval` is a positive whole number of seconds, defaulting to `10`.
+By default, the fixed elapsed-time origin is extracted from the newest
+`load-YYYYMMDDTHHMMSSZ-PID-RANDOM` directory under `RUN_LOAD_LOG_ROOT`
+(default: `./logs`, relative to the caller). Selection uses the start timestamp,
+not modification time, so writing to an older load's logs cannot select it.
+The selected directory and start time are printed. This is the loader's setup
+time, including preflight and cleanup, not the time of its first warehouse insert.
+The logs do not identify the database target; when several targets share a log
+root, select the appropriate load explicitly.
+
+`--log-dir DIR` selects a specific load directory; inherited `LOG_DIR` supplies
+its default. `--started-at` overrides discovery entirely and accepts UTC
+timestamps in `YYYYMMDDTHHMMSSZ` or `YYYY-MM-DDTHH:MM:SSZ` format.
+Missing logs or a selected directory without a valid timestamp fail explicitly;
+use `--started-at` for a custom-named log directory or when logs are on another
+machine. These three options are only valid with `--monitor-data-loading`;
+`hammerdb` may optionally precede the action.
+
+Each poll reports `checked_at`, `elapsed`, `warehouse_count`, `min_w_id`,
+`max_w_id`, and `total_shard_size`, using the logical `public.warehouse` table
+and `pg_size_pretty(sum(shard_size))` from `citus_shards`. An empty warehouse
+table still produces one row with a zero count and null ID bounds.
+The count is exact and may be expensive on a large distributed table.
+`psql \watch` controls polling; slow queries can stretch the requested interval.
+Press **Ctrl-C** to stop. Connection and SQL failures exit nonzero.
+
+Watching loads **only** the selected private connection environment
+(`--connection-env`, `CONNECTION_ENV_FILE`, or the checkout's `connection.env`).
+Benchmark/run files are not loaded, and their CLI selectors are rejected.
+Set `RUN_LOAD_LOG_ROOT` or `LOG_DIR` in the calling environment when needed;
+settings in an unloaded run file do not affect discovery. Inferring the start
+time also requires Python 3; an explicit `--started-at` does not.
+It requires `PG_TARGET_MODE=existing`, a `psql` client, and a Citus query endpoint
+where `PGUSER` can read both relations. It uses read-only transactions, never
+starts a server or HammerDB, and creates no run artifacts. Unlike `--verify`,
+it does not check warehouse coverage or declare the load complete.
+For a PostgreSQL installation outside `PATH`, set `PG_PSQL` to its executable
+path in the connection environment.
+
+With libpq connection settings already configured, the standalone helper is
+[helper_sqls/monitor_data_loading.sql](helper_sqls/monitor_data_loading.sql):
+
+```bash
+psql -X -v started_at=2026-11-09T07:59:42Z -v watch_interval=5 \
+    -f helper_sqls/monitor_data_loading.sql
+```
+
+The helper requires `started_at` as a PostgreSQL timestamp with a time zone;
+`watch_interval` defaults to `10`. Each poll gets a fresh transaction so both
+the data and elapsed time advance.
+
 ## Output and failures
 
 Each operation creates a new private directory under `RUN_OUTPUT_ROOT`:
@@ -971,6 +1040,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 tests/test_monitor_workers.py
 The warehouse SQL integration test creates and stops its own temporary local
 PostgreSQL server, uses a SELECT-only role, and tests both the SQL helper and
 the wrapper against complete, missing, duplicate, and unexpected warehouse IDs.
+It also requires Python 3 and tests data-loading monitoring: repeated output,
+one-second polling, elapsed time, live changes, empty data, errors, and cancellation.
+A local view stands in for Citus shard metadata; Citus itself is not required.
 It never contacts a configured benchmark database. Point `PG_CONFIG` at a
 local PostgreSQL installation with server tools:
 

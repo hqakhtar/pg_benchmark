@@ -28,8 +28,11 @@ umask 077
 # Keep instrumented PostgreSQL builds from writing profiles into their source tree.
 export GCOV_PREFIX="$TEST_ROOT/coverage" GCOV_PREFIX_STRIP=0
 PG_CONFIG="${PG_CONFIG:-pg_config}"
-command -v "$PG_CONFIG" >/dev/null ||
-    { printf 'Missing test dependency: %s\n' "$PG_CONFIG" >&2; exit 1; }
+for command in "$PG_CONFIG" python3
+do
+    command -v "$command" >/dev/null ||
+        { printf 'Missing test dependency: %s\n' "$command" >&2; exit 1; }
+done
 PG_BIN_DIR="$("$PG_CONFIG" --bindir)"
 for command in initdb pg_ctl psql
 do
@@ -48,8 +51,14 @@ PSQL=("$PG_BIN_DIR/psql" -X -w --host="$TEST_ROOT/socket" --port=5432
     --dbname=postgres -v ON_ERROR_STOP=1)
 "${PSQL[@]}" --username=verifier -q <<'SQL'
 CREATE TABLE public.warehouse (w_id integer);
+CREATE TABLE public.test_shard_sizes (shard_size bigint);
+INSERT INTO public.test_shard_sizes VALUES (1536), (512);
+CREATE VIEW public.citus_shards AS
+    SELECT shard_size FROM public.test_shard_sizes
+    WHERE current_setting('transaction_read_only') = 'on';
 CREATE ROLE warehouse_reader LOGIN;
 GRANT SELECT ON public.warehouse TO warehouse_reader;
+GRANT SELECT ON public.citus_shards TO warehouse_reader;
 INSERT INTO public.warehouse SELECT generate_series(1, 5);
 SQL
 
@@ -145,6 +154,136 @@ VERIFY_ENV=("PGHOST=$TEST_ROOT/socket" "PGPORT=5432" "PGDATABASE=postgres"
     "PG_PSQL=$PG_BIN_DIR/psql" "HAMMERDB_HOME=/deliberately/missing/HammerDB"
     "HDB_WAREHOUSES=5" "HDB_FIRST_WAREHOUSE=1" "RUN_LABEL=coverage"
     "RUN_PREPARE_MODE=each" "HDB_RESET_SCHEMA=true" "RUN_ALLOW_DESTRUCTIVE=false")
+
+env "${VERIFY_ENV[@]}" TEST_ROOT="$TEST_ROOT" TEST_PROJECT_ROOT="$ROOT" \
+    python3 - <<'PY'
+import datetime
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import time
+
+root = Path(os.environ["TEST_PROJECT_ROOT"])
+work = Path(os.environ["TEST_ROOT"])
+env = dict(os.environ, PGTZ="UTC",
+           BENCHMARK_ENV_FILE=str(work / "missing-benchmark.env"),
+           RUN_ENV_FILE=str(work / "missing-run.env"),
+           RUN_OUTPUT_ROOT=str(work / "monitor-results"),
+           RUN_LOAD_LOG_ROOT=str(work / "load logs"), LOG_DIR="")
+command = ["bash", str(root / "wrapper.sh"), "--monitor-data-loading",
+           "--connection-env", str(work / "connection.env")]
+log = work / "watch.log"
+
+
+def admin(sql):
+    subprocess.run([env["PG_PSQL"], "-X", "-w", "-v", "ON_ERROR_STOP=1",
+                    "--username=verifier", "-qc", sql], env=env, check=True)
+
+
+def rows():
+    return [tuple(part.strip() for part in line.split("|"))
+            for line in log.read_text().splitlines()
+            if re.match(r"^\s*\d{4}-\d{2}-\d{2} ", line)]
+
+
+def wait_rows(process, count):
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        result = rows()
+        if len(result) >= count:
+            return result
+        assert process.poll() is None, log.read_text()
+        time.sleep(0.05)
+    raise AssertionError("Timed out waiting for watch output:\n" + log.read_text())
+
+
+def stop(process):
+    if process.poll() is None:
+        os.killpg(process.pid, signal.SIGINT)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+            raise
+
+
+def seconds(value):
+    hours, minutes, seconds = value.split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+started = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+started -= datetime.timedelta(seconds=60)
+with log.open("w") as output:
+    process = subprocess.Popen(
+        command + ["--interval", "1", "--started-at", started.strftime("%Y%m%dT%H%M%SZ")],
+        env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        result = wait_rows(process, 1)
+        assert len(result[0]) == 6, result
+        assert result[0][2:] == ("5", "1", "5", "2048 bytes"), result
+        checked = datetime.datetime.fromisoformat(result[0][0] + ":00")
+        assert abs(seconds(result[0][1]) - (checked - started).total_seconds()) < 0.001
+        admin("INSERT INTO public.warehouse VALUES (6)")
+        result = wait_rows(process, 2)
+        assert result[1][2:] == ("6", "1", "6", "2048 bytes"), result
+        delta = (datetime.datetime.fromisoformat(result[1][0] + ":00") - checked).total_seconds()
+        assert 0.9 <= delta <= 1.5, delta
+        assert seconds(result[1][1]) > seconds(result[0][1]), result
+        admin("TRUNCATE public.warehouse; DELETE FROM public.test_shard_sizes")
+        result = wait_rows(process, 3)
+        assert result[2][2:] == ("0", "", "", ""), result
+        admin("DROP VIEW public.citus_shards")
+        assert process.wait(timeout=5) == 3, log.read_text()
+        assert 'relation "citus_shards" does not exist' in log.read_text()
+    finally:
+        stop(process)
+print("PASS: live monitoring repeats at one-second intervals with fresh data and elapsed time")
+print("PASS: empty data stays visible, queries are read-only, and later SQL errors exit nonzero")
+
+admin("CREATE VIEW public.citus_shards AS SELECT shard_size FROM public.test_shard_sizes; "
+      "GRANT SELECT ON public.citus_shards TO warehouse_reader")
+load_logs = Path(env["RUN_LOAD_LOG_ROOT"]) / f"load-{started:%Y%m%dT%H%M%SZ}-1-1"
+load_logs.mkdir(parents=True)
+with log.open("w") as output:
+    process = subprocess.Popen(command, env=env, stdout=output,
+                               stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        result = wait_rows(process, 1)
+        assert "every 10s" in log.read_text(), log.read_text()
+        assert f"Load logs: {load_logs}" in log.read_text(), log.read_text()
+        checked = datetime.datetime.fromisoformat(result[0][0] + ":00")
+        assert abs(seconds(result[0][1]) - (checked - started).total_seconds()) < 0.001
+    finally:
+        stop(process)
+    assert process.returncode in (0, 130, -signal.SIGINT), log.read_text()
+assert not (work / "missing-benchmark.env").exists()
+assert not (work / "missing-run.env").exists()
+assert not (work / "monitor-results").exists()
+print("PASS: default interval and log-derived elapsed origin work without run files; Ctrl-C stops")
+
+for timestamp in ("20260230T075942Z", "20261309T075942Z"):
+    result = subprocess.run(command + ["--started-at", timestamp], env=env,
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "out of range" in result.stderr, result.stderr
+helper = [env["PG_PSQL"], "-X", "-w", "-v", "ON_ERROR_STOP=1",
+          "-f", str(root / "helper_sqls/monitor_data_loading.sql")]
+for options, message in (([], "Specify started_at"),
+                         (["-v", "started_at=2026-11-09T07:59:42Z",
+                           "-v", "watch_interval=0"], "watch_interval must be a positive integer")):
+    result = subprocess.run(helper + options, env=env, capture_output=True,
+                            text=True, timeout=5)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert message in result.stderr, result.stderr
+print("PASS: invalid calendar dates and standalone helper arguments fail explicitly")
+admin("INSERT INTO public.warehouse SELECT generate_series(1, 5)")
+PY
+pass 'data-loading monitor repeats, observes live changes, handles empty data, and stops on errors or cancellation'
+
 invoke_wrapper()
 {
     status=0

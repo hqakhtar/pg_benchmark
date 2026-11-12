@@ -15,6 +15,7 @@ case "$name" in
         ;;
     psql)
         database="" user="" sql_file="" query="" first_warehouse="" expected_warehouses=""
+        watch_interval="" started_at=""
         error_stop=false
         while (($#)); do
             case "$1" in
@@ -22,6 +23,8 @@ case "$name" in
                 --username=*) user="${1#*=}" ;;
                 --set=first_warehouse=*) first_warehouse="${1#--set=first_warehouse=}" ;;
                 --set=expected_warehouses=*) expected_warehouses="${1#--set=expected_warehouses=}" ;;
+                --set=watch_interval=*) watch_interval="${1#--set=watch_interval=}" ;;
+                --set=started_at=*) started_at="${1#--set=started_at=}" ;;
                 -f) sql_file="$2"; shift ;;
                 -Atc) query="$2"; shift ;;
                 ON_ERROR_STOP=1) error_stop=true ;;
@@ -40,6 +43,10 @@ case "$name" in
             then
                 printf 'verify|first=%s|warehouses=%s\n' \
                     "$first_warehouse" "$expected_warehouses" >>"$TEST_TRACE"
+            elif [[ "${sql_file##*/}" == monitor_data_loading.sql ]]
+            then
+                printf 'watch|interval=%s|started_at=%s\n' \
+                    "$watch_interval" "$started_at" >>"$TEST_TRACE"
             fi
 
         elif [[ "$query" == 'SHOW server_version' ]];

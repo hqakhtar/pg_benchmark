@@ -333,6 +333,54 @@ class MonitorTests(unittest.TestCase):
         load = self.make_run(logs, "load-20261106T100000Z-6-6", manifest=False)
         self.assertEqual(monitor_workers.newest_directory(runs, "tpcc", logs), load)
 
+    def test_print_load_start_uses_newest_timestamp_without_scanning_failures(self):
+        logs = self.directory / "load logs"
+        old = self.make_run(logs, "load-20261104T100000Z-1-1", manifest=False)
+        latest = self.make_run(logs, "load-20261105T100000Z-2-2", manifest=False)
+        os.utime(old, (2000000000, 2000000000))
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--load-log-root", str(logs),
+             "--print-started-at"],
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "20261105T100000Z\n")
+        self.assertIn(f"Load logs: {latest}", result.stderr)
+
+    def test_print_load_start_accepts_explicit_directory(self):
+        load = self.make_run(
+            self.directory, "load-20261104T100000Z-1-1", manifest=False,
+        )
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), str(load), "--print-started-at"],
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "20261104T100000Z\n")
+
+    def test_print_load_start_rejects_missing_custom_multiple_and_invalid_dates(self):
+        custom = self.make_run(self.directory, "custom logs", manifest=False)
+        invalid = self.make_run(
+            self.directory, "load-20260230T100000Z-1-1", manifest=False,
+        )
+        valid = self.make_run(
+            self.directory, "load-20261104T100000Z-1-1", manifest=False,
+        )
+        for options in (
+            [str(self.directory / "missing")],
+            [str(custom)],
+            [str(invalid)],
+            [str(valid), str(custom)],
+            ["--load-log-root", str(self.directory / "missing")],
+        ):
+            with self.subTest(options=options):
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), *options, "--print-started-at"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+
     def test_default_wrapper_config_auto_selects_local_benchmark(self):
         checkout = self.configured_checkout()
         latest = self.make_run(

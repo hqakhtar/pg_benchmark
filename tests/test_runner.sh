@@ -111,6 +111,132 @@ assert test ! -s "$TEST_ROOT/trace"
 assert test ! -e "$TEST_ROOT/results"
 pass 'check is offline and existing targets do not need pg_config'
 
+EXTRA_ENV=("BENCHMARK_ENV_FILE=$TEST_ROOT/missing-benchmark.env"
+    "RUN_ENV_FILE=$TEST_ROOT/missing-run.env" "HAMMERDB_HOME=/deliberately/missing/HammerDB")
+invoke --monitor-data-loading --interval 00005 --started-at 20261109T075942Z
+assert test "$status" == 0
+assert grep -Fxq 'watch|interval=5|started_at=2026-11-09T07:59:42Z' "$TEST_ROOT/trace"
+assert grep -Fq 'psql|database=benchmark_db|user=benchmark_user|file=monitor_data_loading.sql|' \
+    "$TEST_ROOT/trace"
+assert test "$(trace_count '^psql|')" == 1
+assert test "$(trace_count '^pg_config|')" == 0
+assert test ! -e "$TEST_ROOT/results"
+pass 'warehouse watching uses only connection config and normalizes interval and UTC start'
+
+mkdir -p -- "$TEST_ROOT/logs/load-20261108T075942Z-1-1" \
+    "$TEST_ROOT/logs/load-20261109T075942Z-2-2"
+touch -- "$TEST_ROOT/logs/load-20261108T075942Z-1-1"
+invoke hammerdb --monitor-data-loading
+assert test "$status" == 0
+assert grep -Fxq 'watch|interval=10|started_at=2026-11-09T07:59:42Z' \
+    "$TEST_ROOT/trace"
+assert grep -Fq "Load logs: $TEST_ROOT/logs/load-20261109T075942Z-2-2" "$TEST_ROOT/current.log"
+assert test ! -e "$TEST_ROOT/results"
+pass 'warehouse watch defaults its interval and infers the newest load start, not directory mtime'
+
+EXTRA_ENV+=("LOG_DIR=$TEST_ROOT/logs/load-20261108T075942Z-1-1")
+invoke --monitor-data-loading
+assert test "$status" == 0
+assert grep -Fxq 'watch|interval=10|started_at=2026-11-08T07:59:42Z' "$TEST_ROOT/trace"
+invoke --monitor-data-loading --log-dir "$TEST_ROOT/logs/load-20261109T075942Z-2-2"
+assert test "$status" == 0
+assert grep -Fxq 'watch|interval=10|started_at=2026-11-09T07:59:42Z' "$TEST_ROOT/trace"
+invoke --monitor-data-loading --log-dir /missing/logs --started-at 20261109T075942Z
+assert test "$status" == 0
+assert grep -Fxq 'watch|interval=10|started_at=2026-11-09T07:59:42Z' "$TEST_ROOT/trace"
+pass 'log directory selectors choose an older load and an explicit start bypasses log discovery'
+
+cp -- "$TEST_ROOT/connection.env" "$TEST_ROOT/watch-connection.env"
+printf 'PGDATABASE=watch_db\nPGUSER=watch_reader\n' >>"$TEST_ROOT/watch-connection.env"
+EXTRA_ENV+=("CONNECTION_ENV_FILE=$ROOT/connection.env.sample")
+invoke --monitor-data-loading --connection-env ./watch-connection.env \
+    --started-at 2026-11-09T07:59:42Z
+assert test "$status" == 0
+assert grep -Fq 'psql|database=watch_db|user=watch_reader|' "$TEST_ROOT/trace"
+assert grep -Fxq 'watch|interval=10|started_at=2026-11-09T07:59:42Z' "$TEST_ROOT/trace"
+pass 'watch connection selectors override defaults and accept ISO UTC start timestamps'
+
+EXTRA_ENV=("RUN_LOAD_LOG_ROOT=$TEST_ROOT/no-logs")
+invoke --monitor-data-loading
+assert test "$status" != 0
+assert grep -Fq 'Cannot infer the load start time' "$TEST_ROOT/current.log"
+assert test ! -s "$TEST_ROOT/trace"
+mkdir -p -- "$TEST_ROOT/custom logs" "$TEST_ROOT/logs/load-20260230T075942Z-3-3"
+for directory in "$TEST_ROOT/missing-logs" "$TEST_ROOT/custom logs" \
+    "$TEST_ROOT/logs/load-20260230T075942Z-3-3"
+do
+    invoke --monitor-data-loading --log-dir "$directory"
+    assert test "$status" != 0
+    assert grep -Fq 'Cannot infer the load start time' "$TEST_ROOT/current.log"
+    assert test ! -s "$TEST_ROOT/trace"
+done
+EXTRA_ENV=("RUN_LOAD_LOG_ROOT=$TEST_ROOT/logs")
+invoke --monitor-data-loading
+assert test "$status" == 0
+assert grep -Fxq 'watch|interval=10|started_at=2026-11-09T07:59:42Z' "$TEST_ROOT/trace"
+pass 'missing, custom-named and invalid-date logs fail explicitly; alternate log roots work'
+
+EXTRA_ENV=()
+for value in 0 -1 1.5 invalid 2147483648
+do
+    invoke --monitor-data-loading --interval "$value"
+    assert test "$status" == 2
+    assert grep -Fq 'watch_interval must be an integer' "$TEST_ROOT/current.log"
+    assert test ! -s "$TEST_ROOT/trace"
+done
+for value in invalid 20261109T075942 2026-11-09T07:59:42+00:00 "20261109T075942Z'; SELECT 1; --"
+do
+    invoke --monitor-data-loading --started-at "$value"
+    assert test "$status" == 2
+    assert grep -Fq -- '--started-at must be UTC' "$TEST_ROOT/current.log"
+    assert test ! -s "$TEST_ROOT/trace"
+done
+pass 'watch rejects invalid intervals and timestamp formats before connecting'
+
+for option in --interval --started-at --log-dir
+do
+    invoke --monitor-data-loading "$option"
+    assert test "$status" == 2
+    assert grep -Fq 'requires a value' "$TEST_ROOT/current.log"
+    invoke hammerdb --check "$option" 5
+    assert test "$status" == 2
+    assert grep -Fq 'only valid with --monitor-data-loading' "$TEST_ROOT/current.log"
+    assert test ! -s "$TEST_ROOT/trace"
+done
+for action in --verify --prepare --load --cleanup --check --monitor
+do
+    invoke --monitor-data-loading "$action"
+    assert test "$status" == 2
+    assert grep -Fq 'Choose only one action' "$TEST_ROOT/current.log"
+done
+for group in benchmark run
+do
+    invoke --monitor-data-loading "--$group-env" "$TEST_ROOT/$group.env"
+    assert test "$status" == 2
+    assert test ! -s "$TEST_ROOT/trace"
+done
+invoke --monitor-data-loading --host runner.invalid
+assert test "$status" == 2
+invoke pgbench --monitor-data-loading
+assert test "$status" == 2
+pass 'watch-only options and incompatible actions or configuration fail explicitly'
+
+EXTRA_ENV=("PG_TARGET_MODE=temporary" "PGHOST=127.0.0.1")
+invoke --monitor-data-loading
+assert test "$status" != 0
+assert grep -Fq 'Warehouse watching requires PG_TARGET_MODE=existing' "$TEST_ROOT/current.log"
+assert test ! -s "$TEST_ROOT/trace"
+EXTRA_ENV=("TEST_PSQL_FAIL=true")
+invoke --monitor-data-loading
+assert test "$status" == 39
+assert grep -Fq 'Warehouse watch failed' "$TEST_ROOT/current.log"
+EXTRA_ENV=()
+invoke --monitor-data-loading --connection-env "$ROOT/connection.env.sample"
+assert test "$status" != 0
+assert grep -Fq 'Sample files cannot be used' "$TEST_ROOT/current.log"
+assert test ! -s "$TEST_ROOT/trace"
+pass 'watch rejects owned-server mode and sample config and propagates client failures'
+
 set +e
 env -i "${BASE_ENV[@]}" env -u PGPASSWORD \
     bash "$WRAPPER" hammerdb --check >"$TEST_ROOT/current.log" 2>&1

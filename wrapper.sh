@@ -11,6 +11,7 @@ usage()
     cat <<'EOF'
 Usage: wrapper.sh BENCHMARK [OPTIONS]
        wrapper.sh --verify [--connection-env FILE] [--benchmark-env FILE] [--run-env FILE]
+       wrapper.sh --monitor-data-loading [--interval SECONDS] [--log-dir DIR] [--started-at TIMESTAMP] [--connection-env FILE]
        wrapper.sh --monitor [DIR ...] [--run-env FILE] [-- MONITOR_OPTIONS]
        wrapper.sh --setup [--host HOST] [-- ANSIBLE_OPTIONS]
        wrapper.sh --update-hammerdb [--host HOST] [-- ANSIBLE_OPTIONS]
@@ -38,6 +39,10 @@ Options:
   --prepare               Prepare data without running iterations
   --load                  Load HammerDB data in parallel on hosts.txt runners
   --verify                Check HammerDB warehouse ID coverage without changing data
+  --monitor-data-loading      Watch warehouse counts, ID range, elapsed time, and Citus size
+  --interval SECONDS      Warehouse watch interval in whole seconds (default: 10)
+  --log-dir DIR          Select load logs for the data-loading start timestamp
+  --started-at TIMESTAMP  Override the data-loading elapsed-time origin in UTC
   --cleanup               Remove benchmark data (requires destructive opt-in)
   --connection-env FILE    Select a complete private connection configuration
   --benchmark-env FILE     Select a complete private benchmark configuration
@@ -55,6 +60,15 @@ RUN_ALLOW_DESTRUCTIVE=true. This action does not run benchmark iterations.
 Verification defaults to hammerdb when no benchmark is supplied. It checks
 HDB_FIRST_WAREHOUSE through HDB_FIRST_WAREHOUSE + HDB_WAREHOUSES - 1 on an
 existing target, not the contents of the other TPC-C tables.
+Warehouse watching loads only the connection environment and requires an
+existing Citus target with warehouse and citus_shards readable by PGUSER.
+--interval, --log-dir and --started-at are only valid with --monitor-data-loading.
+Start timestamps accept YYYYMMDDTHHMMSSZ or YYYY-MM-DDTHH:MM:SSZ.
+Without --started-at, use --log-dir or LOG_DIR, otherwise the newest load-*
+directory under RUN_LOAD_LOG_ROOT (default: ./logs). No usable logs is an error.
+The timestamp is the loader's setup time, including preflight and cleanup.
+Watching uses psql \watch; Ctrl-C stops it. Each poll runs an exact count,
+which can be expensive on a large warehouse table.
 For setup/updates, copy hosts.txt.sample to hosts.txt and edit it, or select --host.
 Run --setup-control-machine once to install missing control-machine tools.
 It does not configure runner VMs or install benchmark/database software.
@@ -82,6 +96,7 @@ Examples:
   ./wrapper.sh hammerdb --prepare
   ./wrapper.sh hammerdb --load --run-env ./run-load.env
   ./wrapper.sh --verify
+  ./wrapper.sh --monitor-data-loading --interval 5 --started-at 20261109T075942Z
   ./wrapper.sh hammerdb
   ./wrapper.sh --setup --host runner.example.com -- --check
 EOF
@@ -108,15 +123,30 @@ azure_options=()
 monitor_directories=()
 monitor_options=()
 monitor_target_config_selected=false
+watch_interval=10
+watch_started_at=""
+watch_log_directory="${LOG_DIR:-}"
+watch_options_selected=false
+watch_non_connection_config_selected=false
 
 while (($#)); do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --setup-control-machine|--setup|--update-hammerdb|--update-config|--azure-create|--azure-delete|--monitor|--check|--prepare|--load|--verify|--cleanup)
+        --setup-control-machine|--setup|--update-hammerdb|--update-config|--azure-create|--azure-delete|--monitor|--check|--prepare|--load|--verify|--monitor-data-loading|--cleanup)
             [[ "$action_set" == false ]] || usage_error "Choose only one action"
             RUN_ACTION="${1#--}"
             action_set=true
             shift
+            ;;
+        --interval|--started-at|--log-dir)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || usage_error "$1 requires a value"
+            case "$1" in
+                --interval) watch_interval="$2" ;;
+                --started-at) watch_started_at="$2" ;;
+                --log-dir) watch_log_directory="$2" ;;
+            esac
+            watch_options_selected=true
+            shift 2
             ;;
         --host)
             [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || usage_error "--host requires a VM name"
@@ -132,8 +162,8 @@ while (($#)); do
 
             case "$1" in
                 --connection-env) connection_file="$2"; monitor_target_config_selected=true ;;
-                --benchmark-env) benchmark_file="$2"; monitor_target_config_selected=true ;;
-                --run-env) run_file="$2" ;;
+                --benchmark-env) benchmark_file="$2"; monitor_target_config_selected=true; watch_non_connection_config_selected=true ;;
+                --run-env) run_file="$2"; watch_non_connection_config_selected=true ;;
             esac
             config_selected=true
             shift 2
@@ -161,6 +191,46 @@ while (($#)); do
             ;;
     esac
 done
+
+[[ "$watch_options_selected" == false || "$RUN_ACTION" == monitor-data-loading ]] ||
+    usage_error "--interval, --log-dir and --started-at are only valid with --monitor-data-loading"
+
+if [[ "$RUN_ACTION" == monitor-data-loading ]]
+then
+    [[ ( -z "$BENCHMARK_TYPE" || "$BENCHMARK_TYPE" == hammerdb ) &&
+       -z "$setup_host" && "$watch_non_connection_config_selected" == false ]] ||
+        usage_error "--monitor-data-loading accepts only hammerdb, watch options, and --connection-env"
+    validate_integer watch_interval "$watch_interval" 1 || exit 2
+    trap 'printf "ERROR: Warehouse watch failed at line %s (exit %s)\n" "$LINENO" "$?" >&2' ERR
+    load_environment "${connection_file:-$FRAMEWORK_ROOT/connection.env}"
+    if [[ -z "$watch_started_at" ]]
+    then
+        require_command python3 || exit 1
+        watch_discovery_options=(--print-started-at)
+        if [[ -n "$watch_log_directory" ]]
+        then
+            watch_discovery_options+=("$watch_log_directory")
+        else
+            watch_discovery_options+=(--load-log-root "${RUN_LOAD_LOG_ROOT:-./logs}")
+        fi
+        watch_started_at="$(python3 "$FRAMEWORK_ROOT/monitor_workers.py" "${watch_discovery_options[@]}")" ||
+            { fail "Cannot infer the load start time; select --log-dir or supply --started-at"; exit 1; }
+    fi
+    if [[ "$watch_started_at" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]
+    then
+        watch_started_at="${watch_started_at:0:4}-${watch_started_at:4:2}-${watch_started_at:6:2}T${watch_started_at:9:2}:${watch_started_at:11:2}:${watch_started_at:13:2}Z"
+    elif [[ ! "$watch_started_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+    then
+        usage_error "--started-at must be UTC: YYYYMMDDTHHMMSSZ or YYYY-MM-DDTHH:MM:SSZ"
+    fi
+
+    source "$FRAMEWORK_ROOT/lib/postgresql.sh"
+    postgresql_validate
+    postgresql_exec "$PGDATABASE" "$PGUSER" \
+        --set=watch_interval="$watch_interval" --set=started_at="$watch_started_at" \
+        -f "$FRAMEWORK_ROOT/helper_sqls/monitor_data_loading.sql"
+    exit 0
+fi
 
 if [[ "$RUN_ACTION" == monitor ]]
 then
