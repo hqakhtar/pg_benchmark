@@ -176,6 +176,13 @@ for 400 workload clients. The timed workload discovers its warehouse range from
 the database; `HDB_WAREHOUSES` controls preparation, not a run-time warehouse cap.
 
 - `HDB_WORKLOAD=tpcc` is the only supported workload.
+- `HDB_ALL_WAREHOUSES=true` sets `tpcc pg_allwarehouse` before loading the timed
+  driver, selecting a new warehouse for each transaction rather than a fixed
+  home warehouse. Set `export HDB_ALL_WAREHOUSES="true"` in the selected
+  HammerDB environment to broaden data access and increase I/O pressure without
+  rebuilding existing data. The default is `false`, including for older private
+  configs without this setting. Only `true` and `false` are accepted; the value
+  is recorded as `all_warehouses` in `benchmark.json`.
 - `HDB_USER_DELAY_MS` sets the delay between virtual-user launches in
   milliseconds for both preparation and timed runs. It maps to HammerDB's
   `user_delay` / `vuset delay`, not transaction pacing or cooldown. The default

@@ -46,6 +46,7 @@ cp -- "$ROOT/hammerdb/hammerdb.env.sample" "$TEST_ROOT/benchmark.env"
 cp -- "$ROOT/run.env.sample" "$TEST_ROOT/run.env"
 printf "export HDB_SUPERUSER_PASSWORD=''\n" >>"$TEST_ROOT/benchmark.env"
 printf 'export HDB_USER_DELAY_MS=500\n' >>"$TEST_ROOT/benchmark.env"
+printf 'export HDB_ALL_WAREHOUSES=true\n' >>"$TEST_ROOT/benchmark.env"
 printf 'export RUN_ALLOW_DESTRUCTIVE=true\n' >>"$TEST_ROOT/run.env"
 password=$'literal password \'"$[brackets];\nsecond line'
 {
@@ -139,6 +140,7 @@ for host in runner-a runner-b runner-c
 do
     assert grep -Fq '"citus": true,' "$TEST_ROOT/logs/preflight.$host.log"
     assert grep -Fq '"user_delay_ms": 500,' "$TEST_ROOT/logs/preflight.$host.log"
+    assert grep -Fq '"all_warehouses": true,' "$TEST_ROOT/logs/preflight.$host.log"
 done
 for workload in "$TEST_ROOT/results"/load-*/*/*/*/prepare/workload.tcl
 do

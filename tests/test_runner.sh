@@ -474,6 +474,43 @@ do
 done
 pass 'the default virtual-user launch delay preserves the existing one-millisecond setting'
 
+assert jq -e '.all_warehouses == false' "$directory/benchmark.json"
+assert grep -Fxq 'diset tpcc pg_allwarehouse "false"' "$directory/iteration-1/workload.tcl"
+grep -v '^export HDB_ALL_WAREHOUSES=' "$TEST_ROOT/benchmark.env" \
+    >"$TEST_ROOT/legacy-benchmark.env"
+EXTRA_ENV=()
+invoke hammerdb --check --benchmark-env "$TEST_ROOT/legacy-benchmark.env"
+assert test "$status" == 0
+assert grep -Fq '"all_warehouses": false,' "$TEST_ROOT/current.log"
+assert test ! -s "$TEST_ROOT/trace"
+pass 'all-warehouses mode defaults to false, including for older private configurations'
+
+for all_warehouses in true false
+do
+    cp -- "$TEST_ROOT/benchmark.env" "$TEST_ROOT/all-warehouses.env"
+    printf 'export HDB_ALL_WAREHOUSES=%s\n' "$all_warehouses" \
+        >>"$TEST_ROOT/all-warehouses.env"
+    EXTRA_ENV=("RUN_PREPARE_MODE=once" "RUN_ITERATIONS=1")
+    invoke hammerdb --benchmark-env "$TEST_ROOT/all-warehouses.env"
+    assert test "$status" == 0
+    directory="$(last_run)"
+    assert jq -e ".all_warehouses == $all_warehouses" "$directory/benchmark.json"
+    assert grep -Fxq "diset tpcc pg_allwarehouse \"$all_warehouses\"" \
+        "$directory/iteration-1/workload.tcl"
+    assert test "$(grep -c 'pg_allwarehouse' "$directory/prepare/workload.tcl" || true)" == 0
+done
+pass 'private all-warehouses settings reach timed drivers and metadata without changing preparation'
+
+for all_warehouses in '' invalid 1
+do
+    EXTRA_ENV=("HDB_ALL_WAREHOUSES=$all_warehouses")
+    invoke hammerdb --check
+    assert test "$status" != 0
+    assert grep -Fq 'HDB_ALL_WAREHOUSES must be true or false' "$TEST_ROOT/current.log"
+    assert test ! -s "$TEST_ROOT/trace"
+done
+pass 'invalid all-warehouses settings fail offline before starting native tools'
+
 for delay in 500 0 0050
 do
     EXTRA_ENV=("HDB_USER_DELAY_MS=$delay" "RUN_PREPARE_MODE=once" "RUN_ITERATIONS=1")

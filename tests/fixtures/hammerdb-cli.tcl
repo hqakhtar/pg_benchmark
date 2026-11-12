@@ -6,7 +6,7 @@ set configpostgresql [dict create \
     tpcc [dict create pg_dbase "" pg_defaultdbase "" pg_user "" pg_superuser "" \
         pg_pass old-secret pg_superuserpass old-secret pg_num_vu 1 pg_count_ware 1 \
         pg_first_ware 1 pg_cituscompat false pg_storedprocs false pg_driver timed pg_rampup 0 \
-        pg_duration 1 pg_raiseerror false pg_vacuum false]]
+        pg_duration 1 pg_raiseerror false pg_vacuum false pg_allwarehouse false]]
 
 proc dbset {args} {}
 proc quotemeta {value} { return $value }
@@ -18,7 +18,11 @@ proc diset {section key value} {
 }
 proc giset {args} {}
 proc vuset {args} {}
-proc loadscript {} {}
+proc loadscript {} {
+    if {[dict get $::configpostgresql tpcc pg_allwarehouse] ne $::env(HDB_ALL_WAREHOUSES)} {
+        error "All-warehouses setting did not reach HammerDB before loading the driver"
+    }
+}
 proc vucreate {} {}
 proc vudestroy {} {}
 proc vucomplete {} { return true }

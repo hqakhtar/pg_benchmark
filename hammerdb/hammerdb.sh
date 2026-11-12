@@ -12,6 +12,8 @@ benchmark_describe()
     fi
 
     validate_integer HDB_USER_DELAY_MS "${HDB_USER_DELAY_MS-1}" 0 || return 1
+    export HDB_ALL_WAREHOUSES="${HDB_ALL_WAREHOUSES-false}"
+    validate_boolean HDB_ALL_WAREHOUSES "$HDB_ALL_WAREHOUSES" || return 1
     printf '{\n'
     json_field workload "$HDB_WORKLOAD"
     json_field installation "$HAMMERDB_HOME"
@@ -24,6 +26,7 @@ benchmark_describe()
     printf '  "rampup_minutes": %s,\n' "$HDB_RAMPUP_MINUTES"
     printf '  "duration_minutes": %s,\n' "$HDB_DURATION_MINUTES"
     printf '  "raise_error": %s,\n' "$HDB_RAISEERROR"
+    printf '  "all_warehouses": %s,\n' "$HDB_ALL_WAREHOUSES"
     printf '  "citus": %s,\n' "$HDB_CITUS_COMPAT"
     printf '  "citus_azure_elastic_cluster": %s,\n' "$HDB_CITUS_AZURE_ELASTIC_CLUSTER"
     printf '  "citus_loadbalancer_port": %s,\n' "$HDB_CITUS_LOADBALANCER_PORT"
@@ -85,6 +88,7 @@ TCL
     else
         cat >>"$destination" <<TCL
 diset tpcc pg_driver timed
+diset tpcc pg_allwarehouse $(tcl_literal "$HDB_ALL_WAREHOUSES")
 diset tpcc pg_rampup $(tcl_literal "$HDB_RAMPUP_MINUTES")
 diset tpcc pg_duration $(tcl_literal "$HDB_DURATION_MINUTES")
 diset tpcc pg_raiseerror $(tcl_literal "$HDB_RAISEERROR")
