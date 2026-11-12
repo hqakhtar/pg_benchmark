@@ -97,6 +97,49 @@ elif args[:2] == ["vm", "create"]:
              networkProfile={"networkInterfaces": [{"id": option("--nics"), "deleteOption": "Delete"}]})
 elif args[:2] == ["tag", "update"] or args[:3] == ["network", "vnet", "create"]:
     pass
+elif args[:3] == ["network", "vnet", "peering"]:
+    network_id = (
+        f"/subscriptions/{subscription}/resourceGroups/{option('--resource-group')}"
+        f"/providers/Microsoft.Network/virtualNetworks/{option('--vnet-name')}"
+    ).lower()
+    peerings = state.setdefault("peerings", {})
+    entries = peerings.setdefault(network_id, [])
+    action = args[3]
+    if action == "list":
+        output(entries)
+    elif action == "create":
+        state["peering_create_calls"] = state.get("peering_create_calls", 0) + 1
+        save()
+        if state.get("fail_peering_create") == state["peering_create_calls"]:
+            print("Synthetic peering creation failure", file=sys.stderr)
+            sys.exit(46)
+        entry = {
+            "name": option("--name"),
+            "remoteVirtualNetwork": {"id": option("--remote-vnet")},
+            "allowVirtualNetworkAccess": "--allow-vnet-access" in args,
+            "provisioningState": "Succeeded",
+            "peeringState": "Initiated",
+        }
+        entries.append(entry)
+        for source, links in peerings.items():
+            for link in links:
+                reverse = peerings.get(link["remoteVirtualNetwork"]["id"].lower(), [])
+                if any(item["remoteVirtualNetwork"]["id"].lower() == source for item in reverse):
+                    link["peeringState"] = "Connected"
+        save()
+        output(entry)
+    elif action == "wait":
+        if state.get("fail_peering_wait"):
+            print("Synthetic peering connection wait failure", file=sys.stderr)
+            sys.exit(46)
+    elif action == "show":
+        entry = next((item for item in entries if item["name"] == option("--name")), None)
+        if entry is None:
+            sys.exit(43)
+        output(entry)
+    else:
+        print(f"Unsupported mock peering action: {action}", file=sys.stderr)
+        sys.exit(45)
 elif "show" in args:
     if args[:3] == ["network", "nic", "show"] and "--query" in args:
         nic = next(item for item in state["resources"] if item["name"] == option("--name"))
